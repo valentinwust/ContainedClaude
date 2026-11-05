@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Claude Contained">
+<title>Claude Contained</title>
+<path fill="#E3161D" d="M128 134L149.47 155.47L128 176.94L106.53 155.47ZM102.67 159.33L50 212L125.27 212L125.27 181.93ZM153.33 159.33L206 212L130.73 212L130.73 181.93Z"/>
+<path fill="none" stroke="#24292f" stroke-width="14" d="M38 216V128C38 70 96.5 42 128 42M158 216V128C158 84 138.5 42 128 42M218 216V128C218 70 159.5 42 128 42M98 128C98 84 117.5 42 128 42"/>
+<path fill="#24292f" d="M91 216H105V170.92L91 179.08ZM91 165.08L105 156.92V128H91Z"/>
+<rect fill="#24292f" x="26" y="120" width="204" height="14" rx="3"/>
+<rect fill="#24292f" x="18" y="212" width="220" height="20" rx="4"/>
+<circle fill="#24292f" cx="128" cy="42" r="13"/>
+<circle fill="none" stroke="#24292f" stroke-width="6" cx="128" cy="18" r="9"/>
+</svg>

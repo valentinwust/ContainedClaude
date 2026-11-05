@@ -1,0 +1,505 @@
+"""Functional self-test: checks that everything an agent SHOULD be able to do actually works.
+
+Counterpart of doctor.py (which checks that the ways out are blocked). Runs INSIDE a normal session sandbox,
+started by `containedclaude test` through project.run, so it uses exactly the path a real session uses.
+Everything happens in a temporary folder <project>/.cc_selftest_<stamp>/ that is removed at the end
+(unless --keep). argv[1]: JSON {"jobs", "image", "gpu", "build", "keep", "automount": [explicit shares]}.
+
+Output is meant for humans: sections, one line per check (ok / FAIL / skip), timings, and a summary.
+Exit status 0 if nothing failed.
+"""
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+
+ARGS = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
+PROJECT = os.environ.get("CONTAINEDCLAUDE_PROJECT", os.getcwd())
+CLONE = os.environ.get("CONTAINEDCLAUDE_CLONE", "")
+PULL_URI = "docker://quay.io/biocontainers/seqtk:1.4--he4a0461_2"   # small, glibc-based
+
+COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+def c(code, s):
+    return "\033[%sm%s\033[0m" % (code, s) if COLOR else s
+
+counts = {"ok": 0, "FAIL": 0, "skip": 0}
+failed = []
+T0 = time.time()
+
+
+def section(title):
+    print("\n" + c("1", title))
+
+
+def line(status, name, detail="", secs=None):
+    counts[status] += 1
+    if status == "FAIL":
+        failed.append(name)
+    mark = {"ok": c("32", "  ok  "), "FAIL": c("31;1", " FAIL "), "skip": c("33", " skip ")}[status]
+    t = c("2", " %5.1fs" % secs) if secs is not None and secs >= 0.5 else ""
+    d = c("2", "  " + detail) if detail else ""
+    print("%s %s%s%s" % (mark, name, d, t))
+    sys.stdout.flush()
+
+
+def check(name, fn):
+    """fn() returns detail string (success) or raises; returning None/False counts as failure."""
+    t = time.time()
+    try:
+        r = fn()
+        if r is False or r is None:
+            line("FAIL", name, "", time.time() - t)
+        elif isinstance(r, tuple) and r[0] == "skip":
+            line("skip", name, r[1])
+        else:
+            line("ok", name, "" if r is True else str(r), time.time() - t)
+    except Exception as e:     # noqa: BLE001  (any error is a failed check, shown with its message)
+        msg = str(e).strip().splitlines()
+        line("FAIL", name, (msg[-1] if msg else type(e).__name__)[:110], time.time() - t)
+
+
+# run in an image job: what it sees of the node's name resolution, time zone and the job's variables
+IMAGE_ENV_PROBE = ('{ grep -c "^nameserver" /etc/resolv.conf; grep -c localhost /etc/hosts; '
+                   'echo "$USER|$OMP_NUM_THREADS|$XDG_CACHE_HOME|$(date +%Z)"; } > img_env 2>&1')
+
+
+def image_env(td):
+    assert wait_file(os.path.join(td, "img_env")), "no output"
+    ns, hosts, env = (read(os.path.join(td, "img_env")).splitlines() + ["", "", ""])[:3]
+    assert ns.isdigit() and int(ns) > 0, "no nameserver in /etc/resolv.conf (DNS fails)"
+    assert hosts.isdigit() and int(hosts) > 0, "no localhost in /etc/hosts"
+    user, threads, cache, tz = (env.split("|") + ["", "", "", ""])[:4]
+    want = os.path.join(os.environ["CONTAINEDCLAUDE_PROJECT"], ".cache")
+    assert user == os.environ.get("USER"), "USER is %r" % user
+    assert threads.isdigit(), "OMP_NUM_THREADS is %r" % threads
+    assert cache == want, "XDG_CACHE_HOME is %r" % cache
+    assert tz == time.strftime("%Z"), "time zone %r instead of %r" % (tz, time.strftime("%Z"))
+    return "%s nameserver, USER, %s threads, caches in the project, %s" % (ns, threads, tz)
+
+
+def checksum_ok(image):
+    import hashlib
+    with open(image + ".sha256") as fh:
+        digest, name = fh.read().split()
+    h = hashlib.sha256()
+    with open(image, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    assert name == os.path.basename(image), "names %s" % name
+    assert digest == h.hexdigest(), "checksum does not match the image"
+    return "%s.sha256 matches" % os.path.basename(image)
+
+
+def sh(cmd, timeout=600, cwd=None):
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
+                       timeout=timeout, cwd=cwd, shell=isinstance(cmd, str))
+    return r.returncode, r.stdout
+
+
+def must(cmd, timeout=600, cwd=None):
+    rc, out = sh(cmd, timeout, cwd)
+    if rc != 0:
+        raise RuntimeError("exit %d: %s" % (rc, out.strip()[-200:]))
+    return out
+
+
+def jobid(out):
+    for l in out.splitlines():
+        if l.startswith("submitted "):
+            return l.split()[1]
+    raise RuntimeError("no job id in: %s" % out.strip()[-200:])
+
+
+def wait_file(p, secs=60):
+    """Files written by jobs on other nodes can be invisible here for a while (NFS caching)."""
+    end = time.time() + secs
+    while True:
+        try:
+            os.listdir(os.path.dirname(p))      # revalidates the directory's cached entries
+            if os.path.isfile(p):
+                return True
+        except OSError:
+            pass
+        if time.time() > end:
+            return False
+        time.sleep(2)
+
+
+def read(p):
+    with open(p) as fh:
+        return fh.read().strip()
+
+
+# ----------------------------------------------------------------------------------------------- session
+def session_checks(td):
+    section("Project folder (writable)")
+    def files():
+        p = os.path.join(td, "a.txt")
+        with open(p, "w") as fh:
+            fh.write("hello")
+        os.rename(p, p + ".moved")
+        assert read(p + ".moved") == "hello"
+        os.makedirs(os.path.join(td, "sub", "deeper"))
+        os.symlink("a.txt.moved", os.path.join(td, "link"))
+        assert read(os.path.join(td, "link")) == "hello"
+        shutil.rmtree(os.path.join(td, "sub"))
+        return "create, rename, mkdir, symlink, delete"
+    check("files and folders", files)
+    def script():
+        p = os.path.join(td, "s.sh")
+        with open(p, "w") as fh:
+            fh.write("#!/bin/sh\necho runs\n")
+        os.chmod(p, 0o755)
+        return must([p]).strip() == "runs" and "chmod +x and execute"
+    check("executable scripts", script)
+    def git():
+        g = os.path.join(td, "repo")
+        os.mkdir(g)
+        with open(os.path.join(g, "f"), "w") as fh:
+            fh.write("x\n")
+        idn = ["-c", "user.name=selftest", "-c", "user.email=selftest@localhost"]
+        must(["git", "init", "-q"], cwd=g)
+        must(["git", "add", "f"], cwd=g)
+        must(["git"] + idn + ["commit", "-qm", "test"], cwd=g)
+        must(["git", "checkout", "-qb", "branch"], cwd=g)
+        return "init, commit, branch"
+    check("git", git if shutil.which("git") else lambda: ("skip", "git not installed"))
+    if os.path.isdir(os.path.join(PROJECT, ".git")):
+        check("git status of the project", lambda: must(["git", "status", "--short"], cwd=PROJECT) is not None
+              and "works")
+
+    section("Reading outside the project")
+    home = os.path.expanduser("~")
+    def homefile():
+        for n in (".bashrc", ".bash_profile", ".profile"):
+            p = os.path.join(home, n)
+            if os.path.isfile(p):
+                with open(p) as fh:
+                    fh.read(100)
+                return "read ~/%s" % n
+        return "home listing: %d entries" % len(os.listdir(home))
+    check("home directory", homefile)
+    parent = os.path.dirname(PROJECT)
+    check("next to the project", lambda: "%s: %d entries" % (parent, len(os.listdir(parent))))
+    shares = [s for s in ARGS.get("automount", []) if os.path.isdir(s) and s != home]
+    for s in shares[:6]:
+        check("share %s" % s, lambda s=s: "%d entries" % len(os.listdir(s)))
+    if not shares:
+        line("skip", "network shares", "none configured besides ~ (sandbox.automount)")
+
+    section("Temporary space")
+    def tmp():
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "x"), "wb") as fh:
+            fh.write(os.urandom(1 << 20))
+        shutil.rmtree(d)
+        return "TMPDIR=%s (private, in memory)" % os.environ.get("TMPDIR", "/tmp")
+    check("/tmp writable", tmp)
+
+    section("Software")
+    check("python", lambda: must([sys.executable, "-c", "import sys; print(sys.version.split()[0])"]).strip())
+    for py in ("python3", "R", "Rscript"):
+        p = shutil.which(py)
+        if p and py != "R":
+            check("%s on PATH" % py, lambda py=py: must([py, "--version"]).strip().splitlines()[0][:60])
+    common = ["bash", "grep", "sed", "awk", "find", "sort", "tar", "gzip", "curl", "wget", "make", "git"]
+    miss = [x for x in common if not shutil.which(x)]
+    line("ok" if not miss else "skip", "standard tools", "all present" if not miss else "missing: " + " ".join(miss))
+
+    section("Internet")
+    check("DNS", lambda: "pypi.org -> %s" % socket.getaddrinfo("pypi.org", 443)[0][4][0])
+    def https():
+        with urllib.request.urlopen("https://pypi.org/simple/pip/", timeout=20) as r:
+            return "HTTPS GET pypi.org: %d" % r.status
+    check("HTTPS download", https)
+
+    section("Claude Code / Codex")
+    claude = shutil.which("claude")
+    check("claude runs", (lambda: must([claude, "--version"], timeout=60).strip().splitlines()[-1][:60])
+          if claude else lambda: ("skip", "claude not on PATH"))
+    cfgdir = os.environ.get("CLAUDE_CONFIG_DIR", "")
+    def cfgw():
+        p = os.path.join(cfgdir, ".selftest-%s" % os.urandom(3).hex())
+        open(p, "w").close()
+        os.unlink(p)
+        return cfgdir
+    check("contained Claude config writable (login, history)", cfgw if cfgdir else lambda: False)
+    state = os.path.join(PROJECT, ".contained", "state")
+    def with_project(pairs):        # the same files as the project's .contained/state/ entries (bound over)
+        def fn():
+            for rel, p in pairs:
+                src = os.path.join(state, *rel.split("/"))
+                assert os.path.samefile(p, src), "%s is not the project's .contained/state/%s" % (p, rel)
+            return ", ".join(rel for rel, _ in pairs) + " are the project's"
+        return fn
+    check("transcripts, memory and prompt history stay with the project",
+          with_project([("claude/projects", os.path.join(cfgdir, "projects")),
+                        ("claude/history.jsonl", os.path.join(cfgdir, "history.jsonl"))]) if cfgdir else lambda: False)
+    def own_mounts():
+        # every per-project entry of the shared config (policy's lists) is its own mount inside: nothing of
+        # another project behind it, nothing of this project visible to others
+        sys.path.insert(0, os.path.join(CLONE, "lib"))
+        from containedclaude import policy
+        with open("/proc/self/mountinfo") as fh:
+            mounted = {l.split()[4] for l in fh}
+        names = policy.CLAUDE_CONFIG_PER_PROJECT + policy.CLAUDE_CONFIG_PER_PROJECT_FILES + policy.CLAUDE_CONFIG_PER_RUNTIME
+        missing = [n for n in names if os.path.join(cfgdir, n) not in mounted]
+        assert not missing, "shared, not per project: %s" % " ".join(missing)
+        return "%d entries (incl. sessions, shell snapshots, hook env files) are own mounts" % len(names)
+    check("per-project entries of the shared config are own mounts", own_mounts if cfgdir else lambda: False)
+    if ARGS.get("unknown_folder") and cfgdir:     # made by `containedclaude test` on the host before the start
+        n = ARGS["unknown_folder"]
+        check("a new folder of the shared config (tool update) is per project",
+              with_project([("claude/" + n, os.path.join(cfgdir, n))]))
+    def envdoc():
+        assert os.path.isfile(os.path.join(PROJECT, "CLAUDE_environment.md")), "CLAUDE_environment.md missing"
+        assert "@CLAUDE_environment.md" in read(os.path.join(PROJECT, "CLAUDE.md")), "CLAUDE.md lacks the import"
+        return "CLAUDE.md imports CLAUDE_environment.md"
+    check("agents get the environment description", envdoc)
+    codex = shutil.which("codex")
+    def codex_sandbox():
+        # Codex's own sandbox (an inner layer: its bwrap + seccomp) must start inside ours and, in workspace-write
+        # mode, write the project and reach the broker socket; no model call needed. Breaks when a Codex update
+        # changes how its sandbox resolves /tmp or sockets (see DEVELOPMENT.md §5 step 2).
+        rc, out = sh([codex, "sandbox", "-c", 'sandbox_mode="workspace-write"', "--", "sh", "-c",
+                      "echo ok > codex_sandbox_ok && cc-info >/dev/null && echo CC_OK"], timeout=120, cwd=td)
+        if rc != 0 or "CC_OK" not in out:
+            raise RuntimeError("exit %d: %s" % (rc, out.strip()[-200:]))
+        return "writes the project and reaches the broker under its own sandbox"
+    if not codex:                                   # Codex is an optional add-on: one skip line, no failure
+        line("skip", "codex", "not installed (optional)")
+    elif not os.environ.get("CODEX_HOME"):
+        line("skip", "codex", "codex = no in the project config")
+    else:
+        check("codex runs", lambda: must([codex, "--version"], timeout=60).strip().splitlines()[-1][:60])
+        check("codex sessions stay with the project",
+              with_project([("codex/sessions", os.path.join(os.environ["CODEX_HOME"], "sessions"))]))
+        def codex_mounts():
+            sys.path.insert(0, os.path.join(CLONE, "lib"))
+            from containedclaude import policy
+            with open("/proc/self/mountinfo") as fh:
+                mounted = {l.split()[4] for l in fh}
+            names = policy.CODEX_HOME_PER_PROJECT + policy.CODEX_HOME_PER_PROJECT_FILES + policy.CODEX_HOME_PER_RUNTIME
+            missing = [n for n in names if os.path.join(os.environ["CODEX_HOME"], n) not in mounted]
+            assert not missing, "shared, not per project: %s" % " ".join(missing)
+            return "%d entries (incl. shell snapshots, helper programs, server files) are own mounts" % len(names)
+        check("per-project entries of the Codex home are own mounts", codex_mounts)
+        check("codex's own sandbox works inside (workspace-write)", codex_sandbox)
+    hook = os.path.join(CLONE, "sandbox", "hooks", "write_guard.py")
+    def hook_ok():
+        def rc(path):
+            inp = json.dumps({"tool_name": "Write", "tool_input": {"file_path": path}})
+            return subprocess.run([sys.executable, hook], input=inp, universal_newlines=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT).returncode
+        assert rc(os.path.join(td, "x.txt")) == 0, "blocks a project file"
+        assert rc(os.path.join(os.path.expanduser("~"), "x.txt")) == 2, "lets a home file through"
+        assert rc(os.path.join(PROJECT, ".contained", "config.ini")) == 2, "lets a protected file through"
+        return "lets project writes through, explains home and protected files"
+    check("write hook", hook_ok)
+
+    section("Job system (login node)")
+    def info():
+        d = json.loads(must(["cc-info"]))
+        df = d.get("defaults", {})
+        return "defaults: %s cpus, %s, %s, partition %s" % (df.get("cpus"), df.get("mem"), df.get("time"),
+                                                            df.get("partition") or "(default)")
+    check("cc-info", info)
+    check("cc-jobs", lambda: must(["cc-jobs"]) is not None and "works")
+    def cluster():
+        out = must(["cc-cluster"]) or ""
+        table = out.split("\n\n")[0].splitlines()      # the node table ends at the first blank line
+        return out.startswith("NODE") and "%d nodes listed" % (len(table) - 1)
+    check("cc-cluster", cluster)
+    def gpu():
+        rc, out = sh(["cc-gpu"])
+        if "lists no node with a GPU" in out:
+            return ("skip", "Slurm lists no GPU node")
+        return rc == 0 and "NVIDIA-SMI" in out and out.splitlines()[0]
+    check("cc-gpu (ssh to a GPU node)", gpu)
+
+
+# ----------------------------------------------------------------------------------------------- jobs
+def job_checks(td):
+    section("Jobs (submitted to Slurm, run in the same sandbox on a compute node)")
+    print(c("2", "       submitting test jobs; this takes a few minutes depending on the queue"))
+    rel = os.path.relpath(td, PROJECT)
+    probe = ("set -e; hostname > node; head -c 10 ~/.bashrc >/dev/null 2>&1 || ls ~ >/dev/null; echo home > home_ok; "
+             "d=$(mktemp -d); dd if=/dev/zero of=$d/x bs=1M count=64 status=none; rm -r $d; "
+             "df -Pk /tmp | awk 'NR==2{print int($4/1048576)}' > scratch_gb; "
+             "command -v apptainer > apptainer_path; echo \"$CC_TEST_VAR\" > env_ok; echo marker-from-job")
+    t = time.time()
+    ids = {}
+    try:
+        ids["cmd"] = jobid(must(["cc-run", "--name", "cc_test_cmd", "--cwd", td, "--env", "CC_TEST_VAR=inside_ok",
+                                 "--", "sh", "-c", probe]))
+        ids["arr"] = jobid(must(["cc-run", "--name", "cc_test_arr", "--cwd", td, "--array", "1-3", "--",
+                                 "sh", "-c", "echo $SLURM_ARRAY_TASK_ID > arr_$SLURM_ARRAY_TASK_ID"]))
+        ids["after"] = jobid(must(["cc-run", "--name", "cc_test_after", "--cwd", td, "--after", ids["cmd"], "--",
+                                   "sh", "-c", "test -f node && touch after_ok"]))
+        ids["after2"] = jobid(must(["cc-run", "--name", "cc_test_after2", "--cwd", td, "--after",
+                                    ids["cmd"] + "," + ids["arr"], "--",
+                                    "sh", "-c", "test -f node && test -f arr_3 && touch after2_ok"]))
+        ids["fail"] = jobid(must(["cc-run", "--name", "cc_test_fail", "--cwd", td, "--", "false"]))
+        ids["dead"] = jobid(must(["cc-run", "--name", "cc_test_dead", "--cwd", td, "--after", ids["fail"], "--",
+                                  "touch", "dead_ran"]))
+        ids["sleep"] = jobid(must(["cc-run", "--name", "cc_test_cancel", "--cwd", td, "--", "sleep", "600"]))
+        ids["waits"] = jobid(must(["cc-run", "--name", "cc_test_waits", "--cwd", td, "--after", ids["sleep"], "--",
+                                   "true"]))       # pending until cc-cancel below, then cancelled with it
+        if ARGS.get("gpu"):
+            ids["gpu"] = jobid(must(["cc-run", "--name", "cc_test_gpu", "--gpu", "--cwd", td, "--",
+                                     "sh", "-c", "nvidia-smi -L > gpu_ok"]))
+        line("ok", "submit (command, array, dependencies%s)" % (", GPU" if "gpu" in ids else ""),
+             " ".join(ids.values()), time.time() - t)
+    except Exception as e:     # noqa: BLE001
+        line("FAIL", "submit", str(e)[:110])
+        return
+
+    check("cc-jobs lists them", lambda: all(i in must(["cc-jobs"]) for i in ids.values()) and "all listed")
+    def waiting():
+        out = sh(["cc-log", ids["waits"]])[1]
+        assert "is PENDING (Dependency)" in out, out.strip()[-110:]
+        return "says it is waiting"
+    check("cc-log of a job not started yet", waiting)
+    check("cc-cancel", lambda: must(["cc-cancel", ids["sleep"]]) is not None and "cancelled " + ids["sleep"])
+
+    t = time.time()
+    rc, out = sh(["cc-wait", "--interval", "10", "--max", "30"] + [ids[k] for k in ids if k != "sleep"], 2000)
+    line("ok" if rc in (0, 1) else "FAIL", "cc-wait", "exit %d (0 = all succeeded)" % rc, time.time() - t)
+    def usage():
+        rc, out = sh(["cc-usage", ids["cmd"]])
+        rows = [l for l in out.splitlines() if l.startswith(ids["cmd"])]
+        return rc == 0 and "PEAK-MEM" in out and rows and rows[0][:100]
+    check("cc-usage (peak memory, CPU efficiency)", usage)
+
+    check("job ran and wrote into the project",
+          lambda: wait_file(os.path.join(td, "node")) and "on node " + read(os.path.join(td, "node")))
+    check("job reads the home directory", lambda: wait_file(os.path.join(td, "home_ok")) and "yes")
+    check("node-local /tmp scratch", lambda: wait_file(os.path.join(td, "scratch_gb"))
+          and "%s GB free" % read(os.path.join(td, "scratch_gb")))
+    check("apptainer available in jobs", lambda: wait_file(os.path.join(td, "apptainer_path"))
+          and read(os.path.join(td, "apptainer_path")))
+    check("--env reaches the job", lambda: wait_file(os.path.join(td, "env_ok"))
+          and read(os.path.join(td, "env_ok")) == "inside_ok" and "CC_TEST_VAR set")
+    check("array job (3 tasks)", lambda: all(wait_file(os.path.join(td, "arr_%d" % i)) for i in (1, 2, 3)) and "1-3")
+    check("dependency (--after)", lambda: wait_file(os.path.join(td, "after_ok")) and "ran after its parent")
+    check("dependency on two jobs (--after A,B)",
+          lambda: wait_file(os.path.join(td, "after2_ok")) and "ran after both, one an array")
+
+    def dead():
+        rows = [l.split() for l in sh(["cc-usage", ids["dead"]])[1].splitlines()]
+        state = [r[2] for r in rows if len(r) > 2 and r[0] == ids["dead"]]
+        assert not os.path.exists(os.path.join(td, "dead_ran")), "it ran although its parent failed"
+        assert state and state[0] == "CANCELLED", "state %s" % (state[0] if state else "unknown")
+        out = sh(["cc-log", ids["dead"]])[1]
+        assert "never started: CANCELLED" in out, "cc-log: " + out.strip()[-100:]
+        return "cancelled, not left pending; cc-log says it never started"
+    check("dependency on a failed job", dead)
+    check("cc-log", lambda: "marker-from-job" in must(["cc-log", ids["cmd"]]) and "shows the job output")
+    if "gpu" in ids:
+        check("GPU job", lambda: wait_file(os.path.join(td, "gpu_ok")) and read(os.path.join(td, "gpu_ok"))[:70])
+
+    section("Containers (in jobs)")
+    t = time.time()
+    rc, out = sh(["cc-pull", "--wait", PULL_URI, os.path.join(rel, "seqtk.sif")], 2400)
+    sif = os.path.join(td, "seqtk.sif")
+    if rc == 0 and wait_file(sif):
+        line("ok", "cc-pull docker image", PULL_URI.split("/")[-1], time.time() - t)
+        script = "seqtk 2>&1 | grep Version > img_ok; " + IMAGE_ENV_PROBE
+        check("run in pulled image", lambda: must(["cc-run", "--wait", "--name", "cc_test_img", "--cwd", td,
+                                                   "--image", sif, "--", "sh", "-c", script], 2400) is not None
+              and wait_file(os.path.join(td, "img_ok")) and read(os.path.join(td, "img_ok")))
+        check("image job: name resolution and variables as without an image", lambda: image_env(td))
+        check("cc-pull writes the checksum", lambda: checksum_ok(sif))
+    else:
+        line("FAIL", "cc-pull docker image", out.strip()[-110:], time.time() - t)
+    if ARGS.get("build"):
+        os.makedirs(os.path.join(td, "img"))
+        with open(os.path.join(td, "img", "img.def"), "w") as fh:
+            fh.write("Bootstrap: docker\nFrom: debian:bookworm-slim\n%post\n"
+                     "    apt-get update -qq && apt-get install -y -qq --no-install-recommends samtools >/dev/null\n")
+        t = time.time()
+        rc, out = sh(["cc-build", "--wait", os.path.join(rel, "img", "img.def")], 4000)
+        built = os.path.join(td, "img", "img.sif")
+        if rc == 0 and wait_file(built):
+            line("ok", "cc-build (debian + samtools)", "img/img.sif", time.time() - t)
+            check("cc-build writes the checksum", lambda: checksum_ok(built))
+            check("run in built image", lambda: must(["cc-run", "--wait", "--name", "cc_test_built", "--cwd", td,
+                                                      "--image", built, "--", "sh", "-c",
+                                                      "samtools --version | head -1 > built_ok"], 2400) is not None
+                  and wait_file(os.path.join(td, "built_ok")) and read(os.path.join(td, "built_ok")))
+        else:
+            line("FAIL", "cc-build (debian + samtools)", out.strip()[-110:], time.time() - t)
+    else:
+        line("skip", "cc-build", "add --build (pulls debian, ~5 min)")
+    img = ARGS.get("image")
+    if img:
+        check("command in %s" % os.path.basename(img),
+              lambda: must(["cc-run", "--wait", "--name", "cc_test_userimg", "--cwd", td, "--image", img, "--",
+                            "sh", "-c", "python3 --version > userimg_ok 2>&1 || echo ran > userimg_ok"], 2400)
+              is not None and wait_file(os.path.join(td, "userimg_ok")) and read(os.path.join(td, "userimg_ok")))
+        nb = {"cells": [{"cell_type": "code", "metadata": {}, "execution_count": None, "outputs": [],
+                         "source": ["open('nb_ok', 'w').write('notebook ran')"]}],
+              "metadata": {"kernelspec": {"name": "python3", "display_name": "Python 3", "language": "python"}},
+              "nbformat": 4, "nbformat_minor": 5}
+        with open(os.path.join(td, "cc_selftest_nb.ipynb"), "w") as fh:
+            json.dump(nb, fh)
+        def notebook():
+            must(["cc-run", "--wait", "--name", "cc_test_nb", "--image", img,
+                  os.path.join(rel, "cc_selftest_nb.ipynb")], 2400)
+            assert wait_file(os.path.join(td, "nb_ok")), "notebook did not run (does the image have jupyter?)"
+            return "executed copy in the jobs' executed folder"
+        check("notebook in %s" % os.path.basename(img), notebook)
+    else:
+        line("skip", "your own image / notebooks", "add --image SIF (e.g. the project's analysis image)")
+
+
+def cleanup_executed():
+    try:
+        d = json.loads(must(["cc-info"])).get("executed_dir")
+    except Exception:          # noqa: BLE001
+        d = None
+    for base in filter(None, [d, os.path.join(PROJECT, "jobs", "executed")]):
+        if os.path.isdir(base):
+            for f in os.listdir(base):
+                if "cc_selftest_nb" in f:
+                    try:
+                        os.unlink(os.path.join(base, f))
+                    except OSError:
+                        pass
+
+
+def main():
+    print(c("1", "ContainedClaude functional test") + c("2", "  (what SHOULD work; `containedclaude doctor` "
+                                                           "checks what must be blocked)"))
+    print(c("2", "project %s" % PROJECT))
+    td = os.path.join(PROJECT, ".cc_selftest_%s" % time.strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(td)
+    try:
+        session_checks(td)
+        if ARGS.get("jobs"):
+            job_checks(td)
+        else:
+            section("Jobs and containers")
+            line("skip", "jobs, arrays, dependencies, containers", "add --jobs (a few minutes)")
+    finally:
+        if ARGS.get("keep"):
+            print(c("2", "\nkept %s" % td))
+        else:
+            shutil.rmtree(td, ignore_errors=True)
+            cleanup_executed()
+    n = counts
+    print("\n%s  %d ok, %d failed, %d skipped  (%.0fs)" % (
+        c("32;1", "EVERYTHING WORKS") if not n["FAIL"] else c("31;1", "PROBLEMS FOUND"),
+        n["ok"], n["FAIL"], n["skip"], time.time() - T0))
+    if failed:
+        print("failed: " + ", ".join(failed))
+    return 1 if n["FAIL"] else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

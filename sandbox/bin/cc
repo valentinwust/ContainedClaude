@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+"""ContainedClaude job client (inside the sandbox). Talks to the broker outside, which submits to Slurm.
+
+  cc-run   [opts] file.ipynb|.py|.R|.sh [file ...]   run files one after another in one job
+  cc-run   [opts] -- command args...                 run a command
+      --cpus N --mem 16G --time 04:00:00 --gpu --name NAME --image PATH.sif|docker://...|none
+      --array 1-96%20 --after JOBID[,JOBID] --after-any JOBID[,JOBID] --env K=V --cwd DIR --wait [--max MIN]
+  cc-build [opts] containers/x/x.def [out.sif]       build an image (job, fakeroot, inside the sandbox)
+  cc-pull  [opts] docker://... out.sif               pull an image (job)
+  cc-wait  [--max MIN] [--interval S] JOBID ...      block until jobs finished; states + log tails
+  cc-jobs  [--all]                                   this project's queued/running (--all: recent finished too)
+  cc-cancel JOBID ...                                cancel this project's jobs
+  cc-log   JOBID [-n LINES] [-f]                     show a job's log
+  cc-info                                            limits, defaults, nodes (JSON)
+  cc-cluster                                         all nodes with CPUs/memory/GPU in use, everyone's jobs
+  cc-gpu   [NODE]                                    nvidia-smi on a GPU node (default: the first one)
+  cc-usage [JOBID ...]                               what jobs used: peak memory, CPU efficiency (for sizing)
+"""
+import argparse
+import glob
+import json
+import os
+import re
+import socket
+import sys
+import time
+
+SOCK = os.environ.get("CONTAINEDCLAUDE_SOCKET", "/tmp/.containedclaude/broker.sock")
+
+
+def call(payload, timeout=300):
+    if not os.path.exists(SOCK):
+        sys.exit("cc: no broker socket at %s. Are you inside a ContainedClaude session? (jobs cannot submit "
+                 "jobs themselves)" % SOCK)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(SOCK)
+        s.sendall((json.dumps(payload) + "\n").encode())
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    except OSError as e:
+        sys.exit("cc: broker not reachable (%s); the session that started it may have ended" % e)
+    finally:
+        s.close()
+    res = json.loads(buf.decode() or '{"ok": false, "error": "empty answer"}')
+    if not res.get("ok"):
+        sys.exit("cc: " + res.get("error", "unknown error"))
+    return res["result"]
+
+
+def job_name(s):
+    """A default job name the broker accepts: [A-Za-z0-9][A-Za-z0-9._-]{0,63}."""
+    s = re.sub(r"^[^A-Za-z0-9]+", "", re.sub(r"[^A-Za-z0-9._-]", "_", s))
+    return s[:64] or "job"
+
+
+def job_opts(p):
+    p.add_argument("--cpus", type=int)
+    p.add_argument("--mem")
+    p.add_argument("--time")
+    p.add_argument("--gpu", action="store_true")
+    p.add_argument("--name")
+    p.add_argument("--image")
+    p.add_argument("--array")
+    p.add_argument("--after", action="append", default=[], metavar="JOBID[,JOBID]",
+                   help="start when these jobs succeeded; cancelled if one fails")
+    p.add_argument("--after-any", action="append", default=[], metavar="JOBID[,JOBID]",
+                   help="start when these jobs ended, successful or not")
+    p.add_argument("--env", action="append", default=[], metavar="K=V")
+    p.add_argument("--cwd")
+    p.add_argument("--wait", action="store_true", help="block until the job finished")
+    p.add_argument("--max", type=float, default=0, help="with --wait: give up waiting after MIN minutes")
+
+
+def opts_dict(a):
+    env = {}
+    for kv in a.env:
+        if "=" not in kv:
+            sys.exit("cc: --env needs K=V")
+        k, v = kv.split("=", 1)
+        env[k] = v
+    return {"cpus": a.cpus, "mem": a.mem, "time": a.time, "gpu": a.gpu, "name": a.name, "array": a.array,
+            "after": a.after, "after_any": a.after_any, "env": env}
+
+
+def with_checksum(cmd, image, arg):
+    """A job step: `cmd` writes `image` ($1, from $2), then image.sha256 is written next to it (`sha256sum -c`
+    in that folder checks it). An old checksum file goes first, so a failed run leaves none."""
+    script = ('rm -f "$1.sha256" && %s && cd "$(dirname "$1")" && '
+              'sha256sum "$(basename "$1")" > "$(basename "$1").sha256"' % cmd)
+    return ["bash", "-c", script, "cc-image", image, arg]
+
+
+def submit(a, payload):
+    payload.update({"action": "submit", "opts": opts_dict(a), "image": a.image,
+                    "cwd": os.path.realpath(a.cwd or os.getcwd())})
+    r = call(payload)
+    print("submitted %s  (image %s, %d step%s)\nlog: %s" % (r["jobid"], r["image"], r["steps"],
+                                                             "" if r["steps"] == 1 else "s", r["log"]))
+    if a.wait:
+        return wait([r["jobid"]], a.max, 30)
+    return 0
+
+
+def tail(path, n):
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 200 * n))
+            lines = fh.read().decode("utf-8", "replace").splitlines()[-n:]
+        return "\n".join(lines)
+    except OSError as e:
+        return "(no log: %s)" % e
+
+
+def logs_for(jobid):
+    info = call({"action": "info"})
+    return sorted(glob.glob(os.path.join(info["logs"], "*_%s.out" % jobid)) +
+                  glob.glob(os.path.join(info["logs"], "*_%s_*.out" % jobid)))
+
+
+def no_log(jobid):
+    """Why a job has no log: Slurm writes it when the job starts, so one still waiting, or cancelled before it
+    started, has none. The broker refuses a job of another project."""
+    for r in call({"action": "queue"})["rows"]:
+        if jobid in (r["id"], r["array_id"]):
+            if r["state"] == "PENDING":
+                return "%s is PENDING (%s): the log appears when it starts" % (jobid, r["reason"].strip("()"))
+            return "%s is %s: its log appears in a moment" % (jobid, r["state"])
+    rows = call({"action": "usage", "ids": [jobid]})["rows"]
+    if not rows:
+        return "no log for %s" % jobid
+    r = rows[0]
+    if r["nodes"] == "None assigned":
+        return "%s never started: %s%s" % (jobid, r["state"], " (a job it waited for with --after failed, or it "
+                                           "was cancelled while waiting)" if r["state"] == "CANCELLED" else "")
+    return "%s ended %s, but its log is gone" % (jobid, r["state"])
+
+
+def wait(ids, max_min, interval):
+    ids = [str(i).split("_")[0] for i in ids]
+    start = time.time()
+    while True:
+        active = [r for r in call({"action": "queue"})["rows"] if r["array_id"] in ids or r["id"] in ids]
+        if not active:
+            break
+        if max_min and time.time() - start > max_min * 60:
+            print("still running after %g min:" % max_min)
+            for r in active:
+                print("  %-14s %-24s %-10s %s" % (r["id"], r["name"], r["state"], r["elapsed"]))
+            return 2
+        time.sleep(interval)
+    print("all done after %.1f min" % ((time.time() - start) / 60))
+    rows = call({"action": "usage", "ids": ids})["rows"]
+    usage_table(rows)
+    ok = all(r["state"] == "COMPLETED" for r in rows)
+    for j in ids:
+        logs = logs_for(j)
+        for lg in logs[:5]:
+            print("=== %s\n%s" % (lg, tail(lg, 15)))
+        if not logs:
+            print("=== no log: " + no_log(j))
+    return 0 if ok else 1
+
+
+def main():
+    prog = os.path.basename(sys.argv[0])
+    argv = sys.argv[1:]
+    if prog in ("cc", "cc.py"):
+        if not argv or argv[0] in ("-h", "--help"):
+            print(__doc__)
+            return 0
+        prog, argv = "cc-" + argv[0], argv[1:]
+
+    if prog == "cc-run":
+        cmd = []
+        if "--" in argv:
+            i = argv.index("--")
+            argv, cmd = argv[:i], argv[i + 1:]
+        p = argparse.ArgumentParser(prog="cc-run", description="Run files or a command as a sandboxed Slurm job.")
+        job_opts(p)
+        p.add_argument("target", nargs=argparse.REMAINDER,
+                       help="several .ipynb/.py/.R/.sh files (run in order), or ONE file followed by its arguments")
+        a = p.parse_args(argv)
+        if cmd:
+            if a.target:
+                sys.exit("cc-run: give either files or a command after --, not both")
+            a.name = a.name or job_name(os.path.basename(cmd[0]))
+            return submit(a, {"argv": cmd, "kind": "run"})
+        if not a.target:
+            p.error("nothing to run")
+        runnable = all(t.endswith((".ipynb", ".py", ".R", ".sh")) for t in a.target)
+        files, args = (a.target, []) if runnable else (a.target[:1], a.target[1:])
+        a.name = a.name or job_name(os.path.splitext(os.path.basename(files[0]))[0])
+        return submit(a, {"files": files, "args": args, "kind": "run"})
+
+    if prog == "cc-build":
+        p = argparse.ArgumentParser(prog="cc-build", description="Build an apptainer image as a job (fakeroot, "
+                                    "inside the sandbox). Base images must be glibc based (debian, ubuntu, rocky, "
+                                    "micromamba...); alpine/musl bases do not work with fakeroot here.")
+        job_opts(p)
+        p.add_argument("definition")
+        p.add_argument("output", nargs="?")
+        a = p.parse_args(argv)
+        d = os.path.realpath(a.definition)
+        out = os.path.realpath(a.output) if a.output else os.path.splitext(d)[0] + ".sif"
+        a.cwd = a.cwd or os.path.dirname(d)
+        a.cpus, a.mem, a.time = a.cpus or 8, a.mem or "16G", a.time or "02:00:00"
+        a.name = a.name or job_name("build_" + os.path.basename(os.path.splitext(d)[0]))
+        a.image = "none"
+        return submit(a, {"argv": with_checksum("apptainer build --fakeroot --force \"$1\" \"$2\"", out, d),
+                          "kind": "build"})
+
+    if prog == "cc-pull":
+        p = argparse.ArgumentParser(prog="cc-pull", description="Pull an image (docker://, oras://, library://) "
+                                    "as a job.")
+        job_opts(p)
+        p.add_argument("uri")
+        p.add_argument("output")
+        a = p.parse_args(argv)
+        a.cpus, a.mem, a.time = a.cpus or 4, a.mem or "8G", a.time or "01:00:00"
+        a.name = a.name or "pull"
+        a.image = "none"
+        return submit(a, {"argv": with_checksum("apptainer pull --force \"$1\" \"$2\"",
+                                                os.path.realpath(a.output), a.uri), "kind": "pull"})
+
+    if prog == "cc-wait":
+        p = argparse.ArgumentParser(prog="cc-wait")
+        p.add_argument("--max", type=float, default=0, help="return (exit 2) after MIN minutes")
+        p.add_argument("--interval", type=float, default=30)
+        p.add_argument("ids", nargs="+")
+        a = p.parse_args(argv)
+        return wait(a.ids, a.max, max(5.0, a.interval))
+
+    if prog == "cc-jobs":
+        p = argparse.ArgumentParser(prog="cc-jobs")
+        p.add_argument("--all", action="store_true")
+        a = p.parse_args(argv)
+        rows = call({"action": "queue"})["rows"]
+        print("%-14s %-24s %-10s %-10s %-10s %-5s %-7s %s" % ("JOBID", "NAME", "STATE", "TIME", "LIMIT", "CPUS",
+                                                              "MEM", "REASON/NODE"))
+        for r in rows:
+            print("%-14s %-24s %-10s %-10s %-10s %-5s %-7s %s" % (r["id"], r["name"], r["state"], r["elapsed"],
+                                                                  r["limit"], r["cpus"], r["mem"], r["reason"]))
+        if a.all:
+            print("\nrecent (cc-usage for what they used):")
+            for r in call({"action": "usage", "ids": []})["rows"]:
+                print("  %-14s %-20s %-10s %-9s exit %-5s %s" % (r["id"], r["name"][:20], r["state"],
+                                                               fmt_t(r["elapsed_s"]), r["exit"], r["nodes"]))
+        return 0
+
+    if prog == "cc-cancel":
+        if not argv:
+            sys.exit("usage: cc-cancel JOBID ...")
+        r = call({"action": "cancel", "ids": argv})
+        print(r["output"] or "cancelled %s" % " ".join(argv))
+        return r["returncode"]
+
+    if prog == "cc-log":
+        p = argparse.ArgumentParser(prog="cc-log")
+        p.add_argument("id")
+        p.add_argument("-n", type=int, default=40)
+        p.add_argument("-f", action="store_true", help="follow")
+        a = p.parse_args(argv)
+        files = logs_for(a.id.split("_")[0])
+        if not files:
+            sys.exit("cc-log: " + no_log(a.id))
+        for f in files[:1] if a.f else files:
+            print("=== " + f)
+            print(tail(f, a.n))
+        if a.f:
+            with open(files[0]) as fh:
+                fh.seek(0, 2)
+                while True:
+                    line = fh.readline()
+                    if line:
+                        sys.stdout.write(line)
+                        sys.stdout.flush()
+                    else:
+                        time.sleep(2)
+        return 0
+
+    if prog == "cc-info":
+        print(json.dumps(call({"action": "info"}), indent=1))
+        return 0
+
+    if prog == "cc-cluster":
+        d = call({"action": "cluster"})
+        gb = lambda mb: "%dG" % (int(mb) // 1024) if mb.isdigit() else "-"
+        print("%-10s %-7s %-9s %-11s %s" % ("NODE", "STATE", "CPUS", "MEM", "GPU  (used/total)"))
+        for n in d["nodes"]:
+            print("%-10s %-7s %-9s %-11s %s" % (n["node"], n["state"], "%s/%s" % (n["cpus_alloc"], n["cpus"]),
+                                               "%s/%s" % (gb(n["mem_alloc_mb"]), gb(n["mem_mb"])),
+                                               gpu_text(n["gres"], n["gres_used"])))
+        print("\n%-13s %-14s %-10s %-10s %-5s %-6s %-16s %s" % ("JOBID", "USER", "STATE", "TIME", "CPUS", "MEM",
+                                                                "GRES", "NODE/REASON"))
+        for j in d["jobs"]:
+            print("%-13s %-14s %-10s %-10s %-5s %-6s %-16s %s" % (("*" if j["mine"] else "") + j["id"], j["user"],
+                                                                  j["state"], j["elapsed"], j["cpus"], j["mem"],
+                                                                  j["gres"], j["reason"]))
+        print("\n* = this project. Numbers are Slurm's allocations, not measured load (GPU load: cc-gpu).")
+        return 0
+
+    if prog == "cc-usage":
+        p = argparse.ArgumentParser(prog="cc-usage", description="what this project's jobs used (peak memory, "
+                                    "CPU efficiency): the numbers to size the next request from")
+        p.add_argument("ids", nargs="*", metavar="JOBID", help="default: this project's last 50 jobs")
+        a = p.parse_args(argv)
+        rows = call({"action": "usage", "ids": a.ids})["rows"]
+        if not rows:
+            print("no jobs yet")
+            return 0
+        usage_table(rows, "")
+        return 0
+
+    if prog == "cc-gpu":
+        p = argparse.ArgumentParser(prog="cc-gpu", description="nvidia-smi on a GPU node (ssh from outside)")
+        p.add_argument("node", nargs="?", help="a node Slurm lists with a GPU (default: the first one)")
+        a = p.parse_args(argv)
+        r = call({"action": "gpu", "node": a.node})
+        print("=== %s" % r["node"])
+        sys.stdout.write(r["output"])
+        return 0
+
+    sys.exit("cc: unknown command %s (see cc --help)" % prog)
+
+
+def fmt_t(s):
+    s = int(s or 0)
+    return "%d:%02d:%02d" % (s // 3600, s % 3600 // 60, s % 60)
+
+
+def fmt_mb(mb):
+    if mb is None:
+        return "-"
+    return "%.1fG" % (mb / 1024.0) if mb >= 1024 else "%dM" % mb
+
+
+def usage_table(rows, indent="  "):
+    """One line per job (array tasks separately): what it used against what it got."""
+    fmt = indent + "%-14s %-20s %-10s %-9s %-4s %-9s %-7s %-8s %-8s %-7s %s"
+    print(fmt % ("JOBID", "NAME", "STATE", "ELAPSED", "CPUS", "CPU-USED", "CPU-EFF", "PEAK-MEM", "REQ-MEM",
+                 "MEM-EFF", "EXIT"))
+    pct = lambda v: "-" if v is None else "%d%%" % v
+    for r in rows:
+        print(fmt % (r["id"], r["name"][:20], r["state"], fmt_t(r["elapsed_s"]), r["cpus"], fmt_t(r["cpu_used_s"]),
+                     pct(r["cpu_eff"]), fmt_mb(r["peak_mb"]), fmt_mb(r["req_mb"]), pct(r["mem_eff"]), r["exit"]))
+
+
+def gpu_text(gres, used):
+    """'shard:a40 8/32' from sinfo's Gres 'gpu:a40:1(S:0),shard:a40:32(S:0)' and GresUsed
+    'gpu:a40:0(IDX:N/A),shard:a40:8(8/32)'; whole GPUs only where there are no shards."""
+    pat = r"(gpu|shard):([^:,(]+):(\d+)"
+    total = dict(((m[0], m[1]), int(m[2])) for m in re.findall(pat, gres))
+    use = dict(((m[0], m[1]), int(m[2])) for m in re.findall(pat, used))
+    if not total:
+        return "-"
+    kinds = [k for k in total if k[0] == "shard"] or list(total)
+    return ", ".join("%s:%s %d/%d" % (k[0], k[1], use.get(k, 0), total[k]) for k in kinds)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

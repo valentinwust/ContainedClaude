@@ -1,0 +1,18 @@
+#!/bin/sh
+# Stand-in for commands that cannot work inside a ContainedClaude sandbox (they would need Slurm's
+# authentication socket, ssh keys or your systemd session, all of which are hidden). Explains the alternative.
+name=$(basename "$0")
+case "$name" in
+  sbatch|srun|salloc|sattach|sbcast)
+    msg="submit work with cc-run (files or '-- command'), see 'cc --help' and CLAUDE_environment.md";;
+  squeue|sacct|sinfo|sprio|sshare|sstat|scontrol)
+    msg="use cc-jobs / cc-jobs --all / cc-info / cc-wait / cc-usage for this project's jobs, cc-cluster for the nodes";;
+  scancel) msg="use cc-cancel JOBID";;
+  scrontab|crontab|systemd-run) msg="scheduled or background services are not available; use cc-run";;
+  apptainer|singularity|run-singularity)
+    msg="apptainer runs only inside jobs: cc-run --image IMAGE.sif|docker://... -- cmd, cc-build, cc-pull";;
+  ssh|scp|sftp|slogin) msg="no ssh: keys and agents are hidden; jobs run on compute nodes via cc-run";;
+  *) msg="see CLAUDE_environment.md";;
+esac
+echo "$name is not available in the ContainedClaude sandbox: $msg" >&2
+exit 126
