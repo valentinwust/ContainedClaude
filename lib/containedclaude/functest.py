@@ -10,6 +10,7 @@ Exit status 0 if nothing failed.
 """
 import json
 import os
+import select
 import shutil
 import socket
 import subprocess
@@ -107,6 +108,41 @@ def must(cmd, timeout=600, cwd=None):
     if rc != 0:
         raise RuntimeError("exit %d: %s" % (rc, out.strip()[-200:]))
     return out
+
+
+def guard_run(shell, cmd, cwd, path, inside=False, answer=None):
+    """`cmd` in a clean bash or zsh with lib/shell-guard.sh sourced: (stdout, stderr or what the terminal
+    showed). answer: the reply typed into a terminal (stdin and stderr a pty); None: no terminal."""
+    env = dict(os.environ, PATH=path)
+    env.pop("CONTAINEDCLAUDE", None)
+    if inside:
+        env["CONTAINEDCLAUDE"] = "1"
+    script = '. "%s"; %s' % (os.path.join(CLONE, "lib", "shell-guard.sh"), cmd)
+    argv = ["bash", "--norc", "--noprofile", "-c", script] if shell == "bash" else ["zsh", "-f", "-c", script]
+    if answer is None:
+        r = subprocess.run(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
+        return r.stdout.strip(), r.stderr.strip()
+    master, slave = os.openpty()
+    try:
+        os.write(master, (answer + "\n").encode())
+        r = subprocess.run(argv, cwd=cwd, env=env, stdin=slave, stderr=slave, stdout=subprocess.PIPE,
+                           universal_newlines=True, timeout=30)
+        os.close(slave)
+        slave, seen = None, b""
+        while select.select([master], [], [], 0.2)[0]:
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:         # EIO: the terminal's other side is closed and everything read
+                break
+            if not chunk:
+                break
+            seen += chunk
+        return r.stdout.strip(), seen.decode("utf-8", "replace")
+    finally:
+        os.close(master)
+        if slave is not None:
+            os.close(slave)
 
 
 def jobid(out):
@@ -305,6 +341,41 @@ def session_checks(td):
         assert rc(os.path.join(PROJECT, ".contained", "config.ini")) == 2, "lets a protected file through"
         return "lets project writes through, explains home and protected files"
     check("write hook", hook_ok)
+    def shell_guard():
+        fake = os.path.join(td, "guardbin")
+        os.makedirs(fake)
+        for n in ("claude", "codex", "containedclaude"):     # stand-ins: print their name and arguments
+            with open(os.path.join(fake, n), "w") as fh:
+                fh.write('#!/bin/sh\nprintf %%s %s; printf "|%%s" "$@"; echo\n' % n)
+            os.chmod(os.path.join(fake, n), 0o755)
+        path = fake + os.pathsep + os.environ.get("PATH", "")
+        sub = os.path.join(td, "guardsub")                   # a sub-folder of this project
+        os.makedirs(sub)
+        warn, ask = "warning: running uncontained", "is a ContainedClaude project"
+        cases = [   # cwd, command, inside a sandbox, answer typed (None: no terminal), stdout, in stderr
+            ("/", "claude a 'b c'", False, None, "claude|a|b c", ""),
+            (sub, "claude a 'b c'", False, None, "claude|a|b c", warn),
+            (sub, "claude a", True, None, "claude|a", ""),
+            (sub, "claude update", False, None, "claude|update", ""),
+            (sub, "codex login", False, None, "codex|login", ""),
+            (sub, "command claude a", False, None, "claude|a", ""),
+            (sub, "claude a 'b c'", False, "", "containedclaude|run|--|a|b c", ask),
+            (sub, "claude a", False, "u", "claude|a", ask),
+            (sub, "codex x", False, "", "containedclaude|shell|--|codex|x", ask),     # (`codex a`: apply)
+            ("/", "cclaude a", False, None, "containedclaude|run|--|a", ""),
+            ("/", "ccodex x", True, None, "codex|x", ""),
+        ]
+        shells = ["bash"] + (["zsh"] if shutil.which("zsh") else [])
+        for shell in shells:
+            for cwd, cmd, inside, answer, want, note in cases:
+                got, err = guard_run(shell, cmd, cwd, path, inside, answer)
+                where = "%s, %s%s%s" % (shell, "project" if cwd == sub else cwd, ", inside" if inside else "",
+                                        ", typed %r" % answer if answer is not None else "")
+                assert got == want, "%s: `%s` ran %r, not %r" % (where, cmd, got, want)
+                assert (note in err) if note else not err, "%s: `%s` printed %r" % (where, cmd, err[-80:])
+        return "%s: %d cases each (outside/inside, no terminal, Enter/u, subcommands, cclaude/ccodex)" % (
+            ", ".join(shells), len(cases))
+    check("shell guard (lib/shell-guard.sh)", shell_guard)
 
     section("Job system (login node)")
     def info():

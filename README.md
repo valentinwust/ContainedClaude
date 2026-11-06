@@ -31,6 +31,12 @@ where projects may live. On another cluster start from `./install.sh site.exampl
 `~/ContainedClaude/uninstall.sh` (`--state` also removes the contained Claude and Codex config and login),
 then delete the clone. Projects keep working as normal folders.
 
+Optional: `~/ContainedClaude/install.sh --shell-guard` adds one line to `~/.bashrc` (or `~/.zshrc`). Then
+`claude` or `codex` typed in a contained project asks first: Enter starts it contained, `u` as usual.
+Elsewhere, inside sandboxes and for commands that start no agent (`claude update`, `codex login`, ...)
+nothing changes; without a terminal it only warns. `cclaude` and `ccodex` always start contained, `command
+claude` skips the question, and `uninstall.sh` removes the line.
+
 ## Set up a project
 ```bash
 containedclaude init ~/projects/myanalysis
@@ -59,6 +65,7 @@ and lists what it would touch; `--force` backs those files up and goes ahead. `i
 containedclaude                                     # from inside the project
 containedclaude ~/projects/myanalysis -- --resume   # Claude arguments after --
 containedclaude shell ~/projects/myanalysis         # a bash in the same sandbox
+cclaude                                             # with the shell guard: like containedclaude
 ```
 Contained sessions have their own Claude config, shared by all contained projects: `/login` once in the first
 session. Transcripts, memory and prompt history stay with the project (`.contained/state/`). Settings,
@@ -103,7 +110,8 @@ start says when something is behind. Contained sessions run the host's Claude Co
 update them. Plugins: `containedclaude admin`, then `/plugin update`.
 
 ## Codex
-Codex runs in the same sandbox: `containedclaude shell DIR -- codex`, or from Claude through the Codex plugin.
+Codex runs in the same sandbox: `containedclaude shell DIR -- codex` (`ccodex` with the shell guard), or from
+Claude through the Codex plugin.
 Everything that limits Claude limits Codex the same way; Codex's own sandbox is an inner layer. It has its own
 home, shared by all contained projects (your `~/.codex` is hidden), with its sessions kept per project. Its
 config (`config.toml`, skills, plugins, rules, `AGENTS.md`) is read-only in projects: change it with
@@ -132,6 +140,7 @@ above the first `[section]` (the launcher appends the per-project trust tables a
 | `containedclaude doctor [DIR] [--jobs] [--gpu] [--image SIF]` | what must be blocked |
 | `containedclaude update [DIR] [--check] [--no-pull]` | update the clone, Claude Code and Codex |
 | `containedclaude env [DIR]` | regenerate `CLAUDE_environment.md` |
+| `cclaude` / `ccodex` [args] | Claude / Codex in the sandbox of the current folder (`install.sh --shell-guard`) |
 
 ## License
 MIT, see [LICENSE](LICENSE).

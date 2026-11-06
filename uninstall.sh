@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Undo install.sh: remove the `containedclaude` link from ~/.local/bin (only if it points into this clone).
-#   ./uninstall.sh            the link only; says what else exists and how to remove it
+# Undo install.sh: remove the `containedclaude` link from ~/.local/bin (only if it points into this clone) and
+# the shell guard line from ~/.bashrc / ~/.zshrc (install.sh --shell-guard).
+#   ./uninstall.sh            the link and that line only; says what else exists and how to remove it
 #   ./uninstall.sh --state    also the host-side state in ~/.local/share/containedclaude: the contained Claude
 #                             config (login, plugins, settings), the Codex login, the project
 #                             registry and the update caches. Other files there (your own notes) stay.
@@ -16,7 +17,7 @@ with_state=0
 for a in "$@"; do
   case "$a" in
     --state) with_state=1;;
-    -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "usage: $0 [--state]" >&2; exit 2;;
   esac
 done
@@ -34,6 +35,14 @@ elif [[ -e "$link" ]]; then
 else
   echo "no $link (nothing to remove)"
 fi
+
+# 1b. the shell guard line (install.sh --shell-guard), from either shell's startup file
+mark="# containedclaude shell guard"
+for rc in "$HOME/.bashrc" "${ZDOTDIR:-$HOME}/.zshrc"; do
+  [[ -f "$rc" ]] && grep -qF -- "$mark" "$rc" || continue
+  rest="$( { grep -vF -- "$mark" "$rc" || true; } )"
+  printf '%s\n' "$rest" > "$rc"; echo "removed the shell guard line from $rc"
+done
 
 # 2. projects: listed for information only (from the registry, before it is removed)
 projects=()

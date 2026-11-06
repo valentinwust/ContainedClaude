@@ -161,6 +161,12 @@ reads `AGENTS.md`, which points to it. Besides the rules it tells the agent what
 blocked (`containedclaude add-write` for another writable folder, the config keys for shares and job limits,
 `containedclaude admin` for Claude settings), so that it asks for the right thing instead of working around it.
 
+**Starting uncontained by mistake.** With `install.sh --shell-guard`, `claude` and `codex` are shell functions
+that ask in a contained project whether to start contained (Enter) or not (`u`). They are functions in your
+shell, not wrappers on `PATH`: the launcher looks up the real `claude` on `PATH`, so a wrapper there would also
+run inside every sandbox and in `claude update`. They only cover your interactive shell (not IDEs or other
+programs), so the notice in `CLAUDE_environment.md` stays the safety net.
+
 **The launcher trusts no program a sandbox could have written.** The launcher, the broker and the job wrapper
 run outside the sandbox. They start with the system python (`/usr/bin/python3 -I`) and look up `unshare`,
 `bwrap`, `sbatch`, `claude`, … only in `PATH` folders that are not inside a ContainedClaude project or a

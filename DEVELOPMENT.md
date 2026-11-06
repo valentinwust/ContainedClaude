@@ -66,6 +66,10 @@ lib/containedclaude/
                                required flags -> refuse to start, optional flags -> left out + warning
   updates.py                   update notice (clone, claude, codex), `containedclaude update`, self-test after
                                a change (§3 step 4)
+lib/shell-guard.sh             optional (install.sh --shell-guard), sourced by ~/.bashrc / ~/.zshrc: the shell
+                               functions claude, codex (ask in a contained project), cclaude, ccodex; checked
+                               by functest ("shell guard") with stand-ins, in bash and zsh, with and without a
+                               terminal
 sandbox/bin/cc (+ cc-run cc-wait cc-jobs cc-cancel cc-log cc-build cc-pull cc-info cc-cluster cc-gpu cc-usage
                                symlinks)
                                client used INSIDE the sandbox; talks JSON to the broker socket
@@ -77,9 +81,13 @@ templates/                     config.ini, contained_claude.sh (project stub), C
                                sandbox description), CLAUDE_environment_outside.md (the notice on disk)
 site.curry.ini                 committed curry defaults; copied to site.ini by install.sh / init if missing
 site.example.ini / site.ini    generic template / the active local copy (gitignored)
-install.sh [TEMPLATE]          symlink bin/containedclaude into ~/.local/bin, create site.ini (default from
-                               site.curry.ini)
-uninstall.sh [--state]         remove that symlink (only if it points into this clone); --state: also the known
+install.sh [--shell-guard] [TEMPLATE]
+                               symlink bin/containedclaude into ~/.local/bin, create site.ini (default from
+                               site.curry.ini); --shell-guard: one marked line in the rc file of $SHELL (bash,
+                               zsh) that sources lib/shell-guard.sh (replaces an older one, keeps a symlinked rc;
+                               without the flag, one line on how to add it while that line is missing)
+uninstall.sh [--state]         remove that symlink (only if it points into this clone) and the marked shell guard
+                               line from ~/.bashrc / ~/.zshrc; --state: also the known
                                entries of STATE (claude-config, codex-home, registry, caches; other files and
                                the folder stay), refused while sessions run. Clone and projects untouched.
 LICENSE                        MIT
@@ -491,6 +499,7 @@ affinity count and niceness.
 | apptainer 1.5.5 | exec --userns --containall --workdir --home --pwd --nv --bind --env; build --fakeroot; pull | jobwrap: --userns/--containall/--workdir only if `apptainer exec --help` lists them (compat.likely: if --help is unreadable, pass everything as before); APPTAINER_USERNS=1 forces userns anyway. Security does not depend on these: the surrounding bwrap sandbox decides ro/rw |
 | Claude Code (2.1.318) | (project.run passes --settings / --strict-mcp-config --mcp-config only if `claude --help` lists them, else warns) --settings, --strict-mcp-config, --mcp-config, CLAUDE_CONFIG_DIR, DISABLE_AUTOUPDATER, hook JSON (tool_name, tool_input.file_path/notebook_path, exit 2 = block + stderr), @import in CLAUDE.md | check `claude --help`; config dir layout names in policy.CLAUDE_CONFIG_RO (missing names are skipped) |
 | Slurm 26.05 | sbatch --parsable --comment; squeue -r -o "%F|%i|%j|%T|%M|%l|%C|%m|%b|%R|%k" (also for all users: cc-cluster); sacct -P (JobID, JobName, State, ElapsedRaw, AllocCPUS, TotalCPU, ReqMem, MaxRSS, ExitCode, NodeList; the .batch step for MaxRSS); sstat -P AveCPU,MaxRSS on <job>.batch; sinfo -N -O NodeList,Partition,StateCompact,CPUsState,Memory,AllocMem,Gres,GresUsed | format letters stable for decades; if %k (comment) breaks, ownership still works via state/jobs.tsv; MaxRSS needs jobacct_gather (cgroup here, 30 s samples); GresUsed strings like `shard:a40:8(8/32)` are parsed by cc's gpu_text |
+| claude / codex subcommands (lib/shell-guard.sh) | the shell guard's lists of subcommands that start no agent (`_ccg_claude`, `_ccg_codex`, from `--help`) | a new subcommand that starts no agent asks needlessly until listed; check the lists against `--help` after updates |
 | ssh to compute nodes (cc-gpu) | `ssh -n -o BatchMode=yes NODE nvidia-smi` from the broker with the user's key | if the site adds pam_slurm_adopt (ssh only with a job on the node) cc-gpu fails with the ssh error; nothing else depends on it |
 | munge auth | hidden socket path /run/munge | if Slurm moves to auth/slurm (sackd): socket /run/slurm/sack.socket — already in DEFAULT_HIDE; doctor "real sbatch binary cannot authenticate" copies the real binary to .contained/run/doctor-sbatch (past the shim) and expects an auth error, in the session and in jobs |
 | Python 3.6+ | stdlib only | keep f-strings out? (3.6 has them; avoid walrus/match/`X | Y`) |
@@ -575,6 +584,11 @@ PASSED; `--after 1,abc` and `--after N,` are refused.
 cc-log/cc-wait for a job without a log: `test --jobs` 47 ok (cc-log of a waiting job says PENDING (Dependency),
 of one cancelled by a failed parent "never started: CANCELLED"); cc-wait prints the same line; an id of
 another project or a typo is refused by the broker.
+Shell guard (2026-11-06, Claude Code 2.1.319): `test` 28 ok (bash and zsh, 11 cases each); through a real
+terminal, Enter started a contained `claude -p` (the launcher's self-check ran) and `claude --version` passed
+through; `install.sh --shell-guard` / `uninstall.sh` with a stand-in HOME: an older line replaced, a symlinked
+.bashrc kept, zsh's .zshrc created, an unsupported shell refused before anything is installed; without the flag
+the hint shows only while the line is missing (bash and zsh; none for other shells).
 
 ---------------------------------------------------------------------------------------------------------------
 ## 9. How to change common things
@@ -586,6 +600,7 @@ another project or a typo is refused by the broker.
   value exactly as checked.
 - New functional check: functest.py (session_checks / job_checks; use check(name, fn), fn returns a detail
   string, ('skip', why), or raises). New blocking check: probe.py + doctor.probe_args.
+- Shell guard: lib/shell-guard.sh (the subcommand lists at the top); its test is functest's "shell guard".
 - New subcommand on the host: cli.py. New action for the sandbox: broker.Broker.handle + a cc-* entry.
 - Session memory limit: session_mem in site.ini / .contained/config.ini (0 = none); the scope properties are
   compat.SCOPE_PROPS.
