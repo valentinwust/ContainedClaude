@@ -395,6 +395,10 @@ started propagates in, and arrives READ-WRITE (verified with /home/<unmounted us
 namespace nothing propagates; an unmounted share is simply invisible (listing fails quickly, no hang). Hence
 automount before start, and the `automount` config list. Symptom if a share is missing: "operation not
 permitted"/ENOENT on lstat inside -> add it to automount (or it was slow: deadline 90 s in policy.automount).
+The same makes names that don't exist directly in /home (an autofs map) fail with EPERM inside instead of
+ENOENT: Claude Code looks for .mcp.json in every parent folder, so `claude doctor`, `/doctor` and `claude mcp
+list` in a project below /home report "/home/.mcp.json: EPERM". Harmless (there is no such file, sessions use
+no project .mcp.json, and MCP errors don't pause Claude Code's transcript cleanup).
 
 ### 5.3 Why seccomp?
 dev.tty.legacy_tiocsti=1 on curry: a sandboxed process could push characters into the user's terminal input
