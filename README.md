@@ -3,63 +3,71 @@
   <img alt="Claude Contained" src="assets/banner-light.svg">
 </picture>
 
-Run Claude Code and Codex on a Slurm cluster in a sandbox. The agent (and everything it starts) reads
-everything you can read except credentials, writes only its project folder and the folders you add, and runs
-cluster work only as Slurm jobs through `cc-run`, which run in the same sandbox on the compute node. The
-sandbox enforces; hooks only explain. Built for the curry cluster; other sites need their own `site.ini`.
+Run Claude Code and Codex on a Slurm cluster in a sandbox. Built for the curry cluster; other sites need their
+own `site.ini`.
+
+**TL;DR**
+- The agent, and everything it starts, reads everything you can read except credentials, writes only its
+  project folder and the folders you add, and runs cluster work only as Slurm jobs through `cc-run`. Those
+  jobs run in the same sandbox on the compute node.
+- Once: clone and run `install.sh` (below). Per project: `containedclaude init DIR`, then
+  `containedclaude DIR`; `/login` once in the first session.
+- On curry, projects lie below your home, `/mnt/sds-hd/sd17l002/u/` or `/mnt/sds-hd/sd17l002/p/`. In a shared
+  folder everyone sets up their own sub-folder `p/<project>/<you>` and shares data with `--write`.
+- Jobs get 4 CPUs / 32G / 4 h by default, at most 72 CPUs / 700G / 24 h each, and 4 GPU jobs at a time. A
+  session on the login node gets 32G of memory (`/tmp` included), 8 cores and 300 processes. Each project can
+  change these in `.contained/config.ini`.
+- `containedclaude test DIR` checks what should work, `containedclaude doctor DIR` what must be blocked, and
+  `containedclaude update` updates ContainedClaude, Claude Code and Codex.
 
 > **This is not perfect containment, so don't rely on it alone.** It is a best effort against a confused or
 > prompt-injected agent, not a proven security boundary, and it can't protect against bugs in the kernel,
 > bubblewrap or apptainer. Don't give a contained agent data or credentials that must not leak (the network
-> is open). Review what it changed before you run anything from the project outside the sandbox, including
-> the change report printed at the end of each session. Keep backups and version control. On curry, run every
-> agent that can reach the SDS through ContainedClaude.
+> is open). Before you run anything from the project outside the sandbox, review what the agent changed; every
+> session ends with a change report. Keep backups and version control. On curry, run every agent that can
+> reach the SDS through ContainedClaude.
 
 What exactly is allowed or blocked and why: [EXPLANATIONS.md](EXPLANATIONS.md). How it works inside and how
 to debug it: [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Install
-Needs Linux with unprivileged user namespaces, `bwrap`, `unshare`, `/usr/bin/python3` (3.6 or newer, standard
-library only), Claude Code, and for jobs Slurm and apptainer. Tested on curry (AlmaLinux 9, Python 3.9, bwrap
+Needs Linux with unprivileged user namespaces, `bwrap`, `unshare`, `/usr/bin/python3` (3.6 or newer, no extra
+packages), Claude Code, and for jobs Slurm and apptainer. Tested on curry (AlmaLinux 9, Python 3.9, bwrap
 0.6.3, apptainer 1.5.5, Slurm 26.05).
 ```bash
 git clone https://github.com/valentinwust/ContainedClaude.git ~/ContainedClaude
 ~/ContainedClaude/install.sh     # links `containedclaude` into ~/.local/bin, creates site.ini from site.curry.ini
 ```
-`site.ini` (local, not in git) holds the cluster defaults: partition, GPU gres, shares to mount, limits, and
-where projects may live. On another cluster start from `./install.sh site.example.ini`. Uninstall:
-`~/ContainedClaude/uninstall.sh` (`--state` also removes the contained Claude and Codex config and login),
-then delete the clone. Projects keep working as normal folders.
+On another cluster, start with `./install.sh site.example.ini` and adapt `site.ini` (local, not in git):
+partition, GPUs, shares to mount, limits and where projects may live. Uninstall:
+`~/ContainedClaude/uninstall.sh` (`--state` also removes the contained Claude and Codex login and config),
+then delete the clone. Projects stay normal folders.
 
-Optional: `~/ContainedClaude/install.sh --shell-guard` adds one line to `~/.bashrc` (or `~/.zshrc`). Then
-`claude` or `codex` typed in a contained project asks first: Enter starts it contained, `u` as usual.
-Elsewhere, inside sandboxes and for commands that start no agent (`claude update`, `codex login`, ...)
-nothing changes; without a terminal it only warns. `command claude` skips the question, and `uninstall.sh`
-removes the line. `cclaude` and `ccodex` are a shorthand for starting only: they always start Claude or Codex
-contained in the project of the current folder and pass their arguments on. `cclaude server` is the one
-launcher command they know; everything else (`init`, `shell`, `test`, ...) stays `containedclaude`.
+**Shell guard (optional).** `~/ContainedClaude/install.sh --shell-guard` adds one line to `~/.bashrc` (or
+`~/.zshrc`). Typing `claude` or `codex` in a contained project then asks first: Enter starts it contained, `u`
+as usual. Elsewhere nothing changes, and `command claude` skips the question. `cclaude` and `ccodex` start
+Claude or Codex contained in the current folder's project and pass their arguments on; `cclaude server` starts
+the Remote Control server. Everything else (`init`, `shell`, `test`, ...) stays `containedclaude`.
 
 ## Set up a project
 ```bash
 containedclaude init ~/projects/myanalysis
-# a shared project on the SDS: your own sub-folder as the project, a shared data folder writable too
+# a shared project on the SDS: your own sub-folder is the project, the shared data folder is writable too
 containedclaude init /mnt/sds-hd/sd17l002/p/myproject/$USER --write /mnt/sds-hd/sd17l002/p/myproject/data
-containedclaude add-write ~/projects/myanalysis /another/folder      # later; from the next start
+containedclaude add-write ~/projects/myanalysis /another/folder      # later; applies from the next start
 ```
-`init` creates `.contained_claude.sh`, `.contained/config.ini` and `CLAUDE_environment.md`, and adds an import
-line to `CLAUDE.md` and a pointer to `AGENTS.md`. If the folder already has a Claude setup, it changes nothing
-and lists what it would touch; `--force` backs those files up and goes ahead. `init` and every start check:
-- The project and its write paths lie strictly below `allowed_roots` of `site.ini` (on curry: your home,
-  `/mnt/sds-hd/sd17l002/u/`, `/mnt/sds-hd/sd17l002/p/`), not on a file system you mounted yourself, and are
-  not and don't contain `~`, `~/.config`, `~/.local/bin`, the clone or a credential folder.
-- A project belongs to the user who set it up. In a shared folder every user sets up a sub-folder of their
-  own (`p/<project>/<you>`) and shares data through `--write`.
-- No nesting: no project inside another project or inside any project's write path, and no project that
-  contains one. Each write path gets a `.contained_writable` file that keeps every user's projects out of it.
-- The SDS needs a valid Kerberos ticket (`klist`; `kinit` renews it). curry shows SDS files as owned by
-  `nobody`, so for your own git use outside run `git config --global --add safe.directory
-  '/mnt/sds-hd/sd17l002/*'` (inside, the launcher handles it).
-- Don't hard-link files from elsewhere into a project: the agent editing one edits the original.
+`init` adds `.contained_claude.sh`, `.contained/` and `CLAUDE_environment.md`, which `CLAUDE.md` and
+`AGENTS.md` point to. If the folder already has a Claude setup, it changes nothing and lists what it would
+touch; `--force` backs those files up and goes ahead. `init` and every start check:
+- Projects and write paths lie below `allowed_roots` of `site.ini` (see TL;DR), and none of them is or
+  contains your home, `~/.config`, `~/.local/bin`, the clone or a credential folder.
+- A project belongs to the user who set it up. Projects don't nest: none lies inside another project or its
+  write paths.
+- The SDS needs a valid Kerberos ticket (`klist`; `kinit` renews it).
+
+Don't hard-link files from elsewhere into a project: the agent editing one edits the original. curry shows
+SDS files as owned by `nobody`, so for your own git use outside the sandbox run
+`git config --global --add safe.directory '/mnt/sds-hd/sd17l002/*'` (inside, the launcher handles it).
 
 ## Start
 ```bash
@@ -67,34 +75,15 @@ and lists what it would touch; `--force` backs those files up and goes ahead. `i
 containedclaude                                     # from inside the project
 containedclaude ~/projects/myanalysis -- --resume   # Claude arguments after --
 containedclaude shell ~/projects/myanalysis         # a bash in the same sandbox
-containedclaude server ~/projects/myanalysis        # the Remote Control server (in tmux)
-cclaude --resume                                    # shell guard: containedclaude -- --resume (start only)
-cclaude server                                      # shell guard: containedclaude server
+cclaude --resume                                    # with the shell guard, from inside the project
 ```
-Contained sessions have their own Claude config, shared by all contained projects: `/login` once in the first
-session. Transcripts, memory and prompt history stay with the project (`.contained/state/`). Settings,
-plugins and skills of that config are read-only in projects. Change them with `containedclaude admin`, a
-Claude session with the contained config writable (still sandboxed).
+Contained sessions share their own Claude login and config: `/login` once in the first session. Transcripts,
+memory and prompt history stay with the project (`.contained/state/`). Settings, plugins and skills are
+read-only in projects; change them with `containedclaude admin`, a Claude session (still sandboxed) with that
+config writable.
 
-**Remote Control.** `-- --remote-control` lets you follow and continue a session from claude.ai or the Claude
-app. `containedclaude server` (or `cclaude server`) runs the Remote Control server: it starts new contained
-sessions in the project from claude.ai/code, the app or a claude.ai project, without a terminal. Keep it
-running in tmux. Its sessions work in the project folder (`--spawn same-dir`, passed by default) and share the
-server's sandbox and its limits, so at most 6 run at once (`--capacity N` changes that). It opens no session
-of its own when it starts (`--no-create-session-in-dir`, passed by default): Claude Code would otherwise take
-over the previous run's first session, which fails once you archived it. Right after you stop a server,
-claude.ai still counts it for about a minute, and a new one in that folder is refused ("already served"). The
-server's worktree mode (`--spawn worktree`, or `w` while it runs) is not supported. It gives each session its
-own git checkout so that parallel sessions don't edit the same files. That adds no containment here (the
-checkouts lie inside the project, in the same sandbox), and a checkout holds only the files git tracks, so
-sessions there would miss untracked data and results. On the SDS it also fails at git's ownership check.
-Contained sessions exchange messages (`SendMessage`) only with the other sessions of their project and their
-own agents, also with Remote Control on, and don't create cloud routines (`RemoteTrigger`).
-
-## Inside: jobs and tools
-Agents learn the rules from `CLAUDE_environment.md`, which `CLAUDE.md` imports. On disk it tells an agent
-started without ContainedClaude that it is not contained; every sandbox shows the rules in its place
-(`.contained/run/CLAUDE_environment.md`, regenerated at every start):
+## Jobs and tools
+Agents learn the rules from `CLAUDE_environment.md` and run cluster work as jobs:
 ```bash
 cc-run analysis.ipynb                           # a notebook as a job
 cc-run --cpus 16 --mem 64G -- samtools sort -@ 16 -o out.bam in.bam
@@ -103,47 +92,50 @@ cc-run --array 1-96%20 -- bash per_sample.sh
 cc-wait, cc-jobs, cc-log, cc-cancel, cc-info, cc-usage, cc-cluster, cc-gpu, cc-build, cc-pull
 ```
 Caches (pip, conda, Hugging Face, ...) go to `<project>/.cache/`, new conda environments into the project
-(`conda create -p ./envs/x`). Sessions on the login node are limited in memory, cores, processes and `/tmp`;
-big transfers run as jobs too.
+(`conda create -p ./envs/x`). Big transfers run as jobs too.
+
+## Remote Control
+`containedclaude DIR -- --remote-control` lets you follow and continue a session from claude.ai or the Claude
+app. `containedclaude server DIR` (or `cclaude server`) runs the Remote Control server: keep it running in
+tmux and start new contained sessions in the project from claude.ai/code or the app. It opens none by itself.
+Its sessions share the server's sandbox and limits, so at most 6 run at once (`--capacity N` changes that).
+After you stop a server, claude.ai counts it for about a minute longer and refuses a new one in that folder
+("already served").
+
+The server's worktree mode (`--spawn worktree`, or `w` while it runs) is not supported. Its separate git
+checkouts would add no containment here, and they hold only the files git tracks, so sessions there would
+miss your data and results.
+
+## Codex
+Codex runs in the same sandbox with the same limits: `containedclaude shell DIR -- codex` (`ccodex` with the
+shell guard), or from Claude through the Codex plugin. It has its own login and config, shared by all
+contained projects (your `~/.codex` stays hidden); change the config with `containedclaude admin codex`. Once:
+```bash
+containedclaude shell ~/projects/myanalysis -- codex login --device-auth      # Codex's own login
+containedclaude admin          # the plugin for Claude: /plugin marketplace add openai/codex-plugin-cc,
+                               # /plugin install codex@openai-codex, then /exit
+```
+For long jobs, let Codex wait on a running command for its maximum of 2 h instead of 5 min: put
+`background_terminal_max_timeout = 7200000` near the top of
+`~/.local/share/containedclaude/codex-home/config.toml`, above the first `[section]`.
 
 ## Configure
-The project's `.contained/config.ini` (read-only for the agent) overrides `site.ini`, which overrides the
-built-in defaults. It lists every key with a comment and the default it had at `init`: write paths, shares
-to mount, hidden and protected paths, session limits, job defaults, job limits per job and per project, extra
-`sbatch` options. Changes apply to the next session or job.
+The project's `.contained/config.ini` (read-only for the agent) lists every setting with a comment: write
+paths, shares to mount, hidden and protected paths, session limits, job defaults and limits, extra `sbatch`
+options. It overrides `site.ini`, which overrides the built-in defaults. Changes apply to the next session or
+job.
 
-## Check
+## Check and update
 ```bash
 containedclaude test ~/projects/myanalysis     # what should work (seconds); --jobs, --gpu, --build, --image add more
 containedclaude doctor ~/projects/myanalysis   # what must be blocked; --jobs --gpu also inside jobs
+containedclaude update ~/projects/myanalysis   # update the clone, Claude Code and Codex, then check
 ```
 `test` must end with `EVERYTHING WORKS`, `doctor` with `ALL CHECKS PASSED`. Run both after updating bwrap,
-apptainer or Slurm. After a Claude Code or Codex update, the first start runs the doctor by itself.
-
-## Update
-`containedclaude update [DIR]` pulls the clone (which updates every project at once), runs `claude update`
-and `codex update` on the host when they are behind, and then checks DIR's project. Once a day the first
-start says when something is behind. Contained sessions run the host's Claude Code and Codex and can't
-update them. Plugins: `containedclaude admin`, then `/plugin update`.
-
-## Codex
-Codex runs in the same sandbox: `containedclaude shell DIR -- codex` (`ccodex` with the shell guard), or from
-Claude through the Codex plugin.
-Everything that limits Claude limits Codex the same way; Codex's own sandbox is an inner layer. It has its own
-home, shared by all contained projects (your `~/.codex` is hidden), with its sessions kept per project. Its
-config (`config.toml`, skills, plugins, rules, `AGENTS.md`) is read-only in projects: change it with
-`containedclaude admin codex`. The launcher records the folder trust for each project itself.
-
-The Codex plugin for Claude, once:
-```bash
-containedclaude admin          # inside: /plugin marketplace add openai/codex-plugin-cc
-                               #         /plugin install codex@openai-codex, then /exit
-containedclaude shell ~/projects/myanalysis -- codex login --device-auth      # Codex's own login, once
-```
-For long jobs, raise `background_terminal_max_timeout` to its 2 h limit, otherwise Codex is useless for them: it
-waits at most that long on a running command (milliseconds, default 300000 = 5 min). On the host, put
-`background_terminal_max_timeout = 7200000` near the top of `~/.local/share/containedclaude/codex-home/config.toml`
-above the first `[section]` (the launcher appends the per-project trust tables at the end).
+apptainer or Slurm. After a Claude Code or Codex update, the first start runs the doctor by itself, and once a
+day the first start says when something is behind. One clone serves all projects, so pulling it updates them
+all. Contained sessions can't update Claude Code or Codex themselves. Plugins: `containedclaude admin`, then
+`/plugin update`.
 
 ## Commands
 | command | |
@@ -158,7 +150,7 @@ above the first `[section]` (the launcher appends the per-project trust tables a
 | `containedclaude doctor [DIR] [--jobs] [--gpu] [--image SIF]` | what must be blocked |
 | `containedclaude update [DIR] [--check] [--no-pull]` | update the clone, Claude Code and Codex |
 | `containedclaude env [DIR]` | regenerate `CLAUDE_environment.md` |
-| `cclaude` / `ccodex` [args], `cclaude server` [args] | shorthand: Claude / Codex / the server in the current folder's project, args to Claude / Codex (`install.sh --shell-guard`) |
+| `cclaude` / `ccodex` [args], `cclaude server` [args] | with the shell guard: Claude / Codex / the server in the current folder's project |
 
 ## License
 MIT, see [LICENSE](LICENSE).
