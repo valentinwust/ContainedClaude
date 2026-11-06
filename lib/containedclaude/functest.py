@@ -301,6 +301,12 @@ def session_checks(td):
         assert "@CLAUDE_environment.md" in read(os.path.join(PROJECT, "CLAUDE.md")), "CLAUDE.md lacks the import"
         return "the sandbox description in place of the notice, imported by CLAUDE.md"
     check("agents get the environment description", envdoc)
+    def envdoc_kept():          # read by a first sandbox while `test` started the project a second time
+        got = ARGS.get("envdoc_kept")
+        assert got == ENVDOC_HEADING, got
+        return "a running sandbox kept it while the project was started again"
+    check("the description stays while the project starts again",
+          envdoc_kept if "envdoc_kept" in ARGS else lambda: ("skip", "not run by `containedclaude test`"))
     codex = shutil.which("codex")
     def codex_sandbox():
         # Codex's own sandbox (an inner layer: its bwrap + seccomp) must start inside ours and, in workspace-write

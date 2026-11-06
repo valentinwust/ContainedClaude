@@ -44,6 +44,35 @@ def _root_or_fail(path):
     return root
 
 
+def _envdoc_kept(root):
+    """For `test`: a sandbox of the project that runs while the project is started again keeps the sandbox
+    description (it must not see the notice that is on disk). Returns its first line, or the problem."""
+    import subprocess
+    import tempfile
+    from . import CLONE, policy
+    print("containedclaude: test: starting the project twice at once (a few seconds)", file=sys.stderr)
+    launcher = os.path.join(CLONE, "bin", "containedclaude")
+    doc = os.path.join(root, policy.ENVDOC)
+    with tempfile.TemporaryFile("w+") as err:
+        try:
+            p = subprocess.Popen([launcher, "shell", root, "--", "sh", "-c", 'echo ready; read x; head -n 1 "$1"',
+                                  "sh", doc], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err,
+                                 universal_newlines=True)
+            if p.stdout.readline().strip() != "ready":
+                p.kill()
+                p.wait()
+                err.seek(0)
+                return "the first sandbox did not start: " + (err.read().strip().splitlines() or ["?"])[-1]
+            second = subprocess.run([launcher, "shell", root, "--", "true"], stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300).returncode
+            out, _ = p.communicate("\n", timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return "could not run: %s" % e
+    if second:
+        return "the second start failed (exit %d)" % second
+    return out.strip() or "(nothing read)"
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     from . import compat, project, doctor
@@ -128,6 +157,7 @@ def main(argv=None):
         import json
         import shutil
         from . import policy
+        args["envdoc_kept"] = _envdoc_kept(root)
         # a folder no list knows (as a tool update adds them): the session must get the project's own
         unknown = os.path.join(policy.CLAUDE_CONFIG_DIR, policy.TEST_UNKNOWN_PREFIX + os.urandom(3).hex())
         try:
@@ -160,9 +190,10 @@ def main(argv=None):
         if problems:
             print("containedclaude: %s" % "; ".join(problems), file=sys.stderr)
             return 1
-        project.write_envdoc(cfg)
-        print("wrote %s (the notice for agents outside the sandbox)\nwrote %s (what agents see there inside)" % (
-            os.path.join(root, policy.ENVDOC), policy.envdoc_inside(cfg)))
+        written = project.write_envdoc(cfg)
+        for p, what in ((os.path.join(cfg.project, policy.ENVDOC), "the notice for agents outside the sandbox"),
+                        (policy.envdoc_inside(cfg), "what agents see there inside")):
+            print("%s %s (%s)" % ("wrote" if p in written else "up to date:", p, what))
         project.ensure_gitignore(cfg)
         return 0
     target = os.getcwd()

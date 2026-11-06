@@ -176,7 +176,8 @@ memory, history, session records, shell snapshots, Codex rollouts, ...) are boun
    "trusted"` itself (TOML basic-string escaping) for the project, its git top folder (_git_top: Codex trusts
    the repository root inside a repo) and every nested repository (cfg.git_dirs), each only if its header is
    missing; skipped if config.toml has an inline `projects =` table.
-4. write_envdoc (the description to run/CLAUDE_environment.md, the outside notice to DIR/), refresh_stub
+4. write_envdoc (the description to run/CLAUDE_environment.md, the outside notice to DIR/; each written only
+   when it changed, so the project's running sessions keep their description at another start), refresh_stub
    (rewrites .contained_claude.sh if it differs from the template, so fixes to it reach old projects),
    ensure_import_line (`@CLAUDE_environment.md` back as the FIRST line of CLAUDE.md, which
    agents rewrite), tracked_protected_note (one line if a git-tracked protected file differs between HEAD and
@@ -331,8 +332,8 @@ Order matters: later mounts cover earlier ones.
    area. bwrap binds by path: a relative link in the path would protect the link instead of its target, and an
    absolute one made bwrap fail to start (fixture in doctor.make_fixture covers both). DIR/CLAUDE_environment.md
    gets policy.envdoc_inside (run/CLAUDE_environment.md) as its source instead, when that exists; without it
-   the outside notice shows, the safe side. test checks the description inside (session and job), doctor the
-   notice on disk.
+   the outside notice shows, the safe side. test checks the description inside (session and job, and in a
+   sandbox that runs while the project is started again: cli._envdoc_kept), doctor the notice on disk.
 8. shims: `--ro-bind sandbox/shim <realpath of each command found on the user's original PATH>`.
 9. `--dir /tmp/jupyter-runtime` in sessions (/tmp/.xdg-runtime is the project's runtime folder there, kept by
    nsinit; jobs get an empty `--dir /tmp/.xdg-runtime`), remount-ro hidden dirs, `--unshare-pid` in jobs only
@@ -589,6 +590,9 @@ terminal, Enter started a contained `claude -p` (the launcher's self-check ran) 
 through; `install.sh --shell-guard` / `uninstall.sh` with a stand-in HOME: an older line replaced, a symlinked
 .bashrc kept, zsh's .zshrc created, an unsupported shell refused before anything is installed; without the flag
 the hint shows only while the line is missing (bash and zsh; none for other shells).
+Description kept at another start (2026-11-06): `test` 29 ok; the new check reads the notice with the old
+write_envdoc and the description with the new one; `env` says "up to date" for unchanged files, recreates a
+deleted notice, and a config change reaches new sandboxes while a running one keeps its description.
 
 ---------------------------------------------------------------------------------------------------------------
 ## 9. How to change common things

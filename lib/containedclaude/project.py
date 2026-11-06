@@ -81,6 +81,20 @@ def safe_write(path, text, mode=0o644):
     os.replace(tmp, path)
 
 
+def write_changed(path, text, mode=0o644):
+    """safe_write only when the content differs, so an unchanged file is left as it is (sessions of the project
+    that already run keep showing theirs). True if it was written."""
+    try:
+        if not os.path.islink(path):
+            with open(path) as fh:
+                if fh.read() == text:
+                    return False
+    except (OSError, ValueError):
+        pass
+    safe_write(path, text, mode)
+    return True
+
+
 def render(name, values):
     """A template with {{key}} from `values` and {{site:section.key}} from the built-in defaults + site.ini (a
     value of several lines goes on, commented, on lines of its own)."""
@@ -684,7 +698,9 @@ def refresh_stub(cfg, out=sys.stderr):
 def write_envdoc(cfg):
     """The sandbox description goes to .contained/run/ (policy.envdoc_inside), which every sandbox mounts over
     the project's CLAUDE_environment.md; on disk that file is a notice for agents started without
-    ContainedClaude. So an agent reads that it is sandboxed only when it is."""
+    ContainedClaude. So an agent reads that it is sandboxed only when it is. Each file is written only when it
+    changed: rewriting the notice at another start would show it to the project's running sessions. Returns the
+    paths written."""
     g = lambda k: cfg.get("jobs", k)
     bullets = lambda xs: "\n".join("- `%s`" % x for x in xs) or "- (none)"
     values = {
@@ -707,8 +723,9 @@ def write_envdoc(cfg):
     }
     inside = policy.envdoc_inside(cfg)
     os.makedirs(os.path.dirname(inside), exist_ok=True)
-    safe_write(inside, render("CLAUDE_environment.md", values))
-    safe_write(os.path.join(cfg.project, policy.ENVDOC), render("CLAUDE_environment_outside.md", values))
+    notice = os.path.join(cfg.project, policy.ENVDOC)
+    pairs = [(inside, "CLAUDE_environment.md"), (notice, "CLAUDE_environment_outside.md")]
+    return [p for p, tpl in pairs if write_changed(p, render(tpl, values))]
 
 
 # ---- files that run code OUTSIDE the sandbox later: report changes after a session --------------------
