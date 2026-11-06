@@ -35,8 +35,8 @@ the repository.
 bin/containedclaude            entry point; puts lib/ on sys.path, calls cli.main
 lib/containedclaude/
   __init__.py                  __version__, CLONE (= this repo, resolved via __file__)
-  cli.py                       subcommands: init | add-write | run (default) | shell | doctor | test | admin |
-                               env | update
+  cli.py                       subcommands: init | add-write | run (default) | server | shell | doctor | test |
+                               admin | env | update
   config.py                    defaults + site.ini + <project>/.contained/config.ini; hide/protect/expose lists;
                                mem/time parsers
   policy.py                    THE sandbox: bwrap argument list for modes session/admin/job, outer unshare,
@@ -67,7 +67,8 @@ lib/containedclaude/
   updates.py                   update notice (clone, claude, codex), `containedclaude update`, self-test after
                                a change (§3 step 4)
 lib/shell-guard.sh             optional (install.sh --shell-guard), sourced by ~/.bashrc / ~/.zshrc: the shell
-                               functions claude, codex (ask in a contained project), cclaude, ccodex; checked
+                               functions claude, codex (ask in a contained project), cclaude (`cclaude server`
+                               = `containedclaude server`), ccodex; checked
                                by functest ("shell guard") with stand-ins, in bash and zsh, with and without a
                                terminal
 sandbox/bin/cc (+ cc-run cc-wait cc-jobs cc-cancel cc-log cc-build cc-pull cc-info cc-cluster cc-gpu cc-usage
@@ -256,10 +257,20 @@ the contained .claude.json first (if it exists and parses), so the trust dialog 
 settings.json is the real one, so it gets the launcher's settings as a flag: `--settings F --mcp-config F
 --strict-mcp-config`; project sessions get only the MCP flags (their settings come from settings.json, step 4,
 so hooks don't run twice). --mcp-config is variadic and the boolean after it ends the list, so a subcommand in
-the user's args (`containedclaude admin -- plugin list`) works. `containedclaude -- remote-control` (the server
-for sessions started from claude.ai, as the first argument) gets no flags: Claude Code refuses to start it
-behind --mcp-config/--strict-mcp-config, and the sessions it starts get no flags anyway; they have the
-settings.json rules, `allowedMcpServers: []` included.
+the user's args (`containedclaude admin -- plugin list`) works. `containedclaude server` (= `containedclaude
+-- remote-control`: the server for sessions started from claude.ai, `remote-control` as the first argument)
+gets none of these MCP flags: Claude Code refuses to start it behind --mcp-config/--strict-mcp-config, and
+the sessions it starts get no flags anyway; they have the settings.json rules, `allowedMcpServers: []`
+included. They share the server's sandbox and so its scope
+(session_mem, session_tasks, session_cpus): `server` adds `--capacity 6` (cli.SERVER_CAPACITY), because the
+server's own default of 32 sessions would need more processes+threads than session_tasks, and `--spawn
+same-dir`, which also skips Claude Code's question for the mode. Worktree mode is not supported (README): its
+checkouts hold only tracked files, and on the SDS Claude Code's own git checks run without the GIT_CONFIG_*
+variables that carry safe.directory, so git refuses the repository. `--no-create-session-in-dir`: with a
+`bridge-pointer.json` written in the last 4 h (the server rewrites it at every start) Claude Code takes over
+the previous run's first session, and that start fails once the session was archived on claude.ai. Each flag
+is left out when the args give their own or a mode in which Claude Code refuses it (`--continue`/`-c` and
+`--session-id` refuse all three, `--spawn session` refuses `--capacity` and is its one session).
 
 ---------------------------------------------------------------------------------------------------------------
 ## 4. How a job runs
@@ -650,13 +661,18 @@ yes` `claude mcp list` shows the account's claude.ai connectors, with `no` none.
 Connectors off (2026-11-06): a server-style session (`--print --resume=<id>` without a transcript) printed
 `No conversation found with session ID` followed by "claude.ai MCP servers blocked by enterprise policy",
 which the server showed as the session's failure; with `disableClaudeAiConnectors: true` only the real error.
+Server command (2026-11-06): `test` 32 ok (shell guard 13 cases each, server arguments 13 cases);
+`containedclaude server DIR -- --help` and `cclaude server --help` (outside, and inside a sandbox) print the
+help of `claude remote-control`. By hand: servers started with `--no-create-session-in-dir` open no session
+at start and then serve sessions from claude.ai; a restart within about a minute of stopping is refused
+("already served"), later it works.
 Occasional manual check of messages (by hand, e.g. after a larger Claude Code update; `test` and `update` stay
 short and don't run it): two throwaway projects P and Q; in tmux `containedclaude P -- --name t-A
 --remote-control`, `containedclaude Q -- --name t-C --remote-control`, `containedclaude P -- --name t-B`. Ask
 t-A to call ListAgents, then SendMessage to t-B, to t-C, and to t-C as "t-C [ref]": t-B gets its message,
 both sends to t-C are refused with peer_guard's text. From an unsandboxed session send one message to t-A: t-A
-shows "blocked by hook" and doesn't react. Server mode: `containedclaude P -- remote-control` (answer the
-trust question); one message to it from an unsandboxed session starts a session that shows "blocked by hook";
+shows "blocked by hook" and doesn't react. Server mode: `containedclaude server P` (answer the trust
+question); one message to it from an unsandboxed session starts a session that shows "blocked by hook";
 t-B finds that session in ListAgents (under a name derived from P's folder) and can message it, and it
 reports no RemoteTrigger and no mcp__ tools. Afterwards remove the projects' lines from compat.REGISTRY and
 their trust entries from CODEX_HOME/config.toml, then the folders.

@@ -34,8 +34,10 @@ then delete the clone. Projects keep working as normal folders.
 Optional: `~/ContainedClaude/install.sh --shell-guard` adds one line to `~/.bashrc` (or `~/.zshrc`). Then
 `claude` or `codex` typed in a contained project asks first: Enter starts it contained, `u` as usual.
 Elsewhere, inside sandboxes and for commands that start no agent (`claude update`, `codex login`, ...)
-nothing changes; without a terminal it only warns. `cclaude` and `ccodex` always start contained, `command
-claude` skips the question, and `uninstall.sh` removes the line.
+nothing changes; without a terminal it only warns. `command claude` skips the question, and `uninstall.sh`
+removes the line. `cclaude` and `ccodex` are a shorthand for starting only: they always start Claude or Codex
+contained in the project of the current folder and pass their arguments on. `cclaude server` is the one
+launcher command they know; everything else (`init`, `shell`, `test`, ...) stays `containedclaude`.
 
 ## Set up a project
 ```bash
@@ -65,16 +67,29 @@ and lists what it would touch; `--force` backs those files up and goes ahead. `i
 containedclaude                                     # from inside the project
 containedclaude ~/projects/myanalysis -- --resume   # Claude arguments after --
 containedclaude shell ~/projects/myanalysis         # a bash in the same sandbox
-cclaude                                             # with the shell guard: like containedclaude
+containedclaude server ~/projects/myanalysis        # the Remote Control server (in tmux)
+cclaude --resume                                    # shell guard: containedclaude -- --resume (start only)
+cclaude server                                      # shell guard: containedclaude server
 ```
 Contained sessions have their own Claude config, shared by all contained projects: `/login` once in the first
 session. Transcripts, memory and prompt history stay with the project (`.contained/state/`). Settings,
 plugins and skills of that config are read-only in projects. Change them with `containedclaude admin`, a
-Claude session with the contained config writable (still sandboxed). Remote Control works
-(`-- --remote-control`, or `-- remote-control` for the server that starts sessions from claude.ai; keep it
-running in tmux). Contained sessions exchange messages
-(`SendMessage`) only with the other sessions of their project and their own agents, also with Remote Control
-on, and don't create cloud routines (`RemoteTrigger`).
+Claude session with the contained config writable (still sandboxed).
+
+**Remote Control.** `-- --remote-control` lets you follow and continue a session from claude.ai or the Claude
+app. `containedclaude server` (or `cclaude server`) runs the Remote Control server: it starts new contained
+sessions in the project from claude.ai/code, the app or a claude.ai project, without a terminal. Keep it
+running in tmux. Its sessions work in the project folder (`--spawn same-dir`, passed by default) and share the
+server's sandbox and its limits, so at most 6 run at once (`--capacity N` changes that). It opens no session
+of its own when it starts (`--no-create-session-in-dir`, passed by default): Claude Code would otherwise take
+over the previous run's first session, which fails once you archived it. Right after you stop a server,
+claude.ai still counts it for about a minute, and a new one in that folder is refused ("already served"). The
+server's worktree mode (`--spawn worktree`, or `w` while it runs) is not supported. It gives each session its
+own git checkout so that parallel sessions don't edit the same files. That adds no containment here (the
+checkouts lie inside the project, in the same sandbox), and a checkout holds only the files git tracks, so
+sessions there would miss untracked data and results. On the SDS it also fails at git's ownership check.
+Contained sessions exchange messages (`SendMessage`) only with the other sessions of their project and their
+own agents, also with Remote Control on, and don't create cloud routines (`RemoteTrigger`).
 
 ## Inside: jobs and tools
 Agents learn the rules from `CLAUDE_environment.md`, which `CLAUDE.md` imports. On disk it tells an agent
@@ -137,12 +152,13 @@ above the first `[section]` (the launcher appends the per-project trust tables a
 | `containedclaude add-write DIR PATH ...` | more writable folders for an existing project |
 | `containedclaude [run] [DIR] [-- claude args]` | start Claude in the sandbox |
 | `containedclaude shell [DIR] [-- cmd]` | bash (or a command) in the sandbox |
+| `containedclaude server [DIR] [-- args]` | the Remote Control server: contained sessions started from claude.ai |
 | `containedclaude admin` / `admin codex` | Claude / Codex with the contained config writable |
 | `containedclaude test [DIR] [--jobs] [--build] [--gpu] [--image SIF]` | what should work |
 | `containedclaude doctor [DIR] [--jobs] [--gpu] [--image SIF]` | what must be blocked |
 | `containedclaude update [DIR] [--check] [--no-pull]` | update the clone, Claude Code and Codex |
 | `containedclaude env [DIR]` | regenerate `CLAUDE_environment.md` |
-| `cclaude` / `ccodex` [args] | Claude / Codex in the sandbox of the current folder (`install.sh --shell-guard`) |
+| `cclaude` / `ccodex` [args], `cclaude server` [args] | shorthand: Claude / Codex / the server in the current folder's project, args to Claude / Codex (`install.sh --shell-guard`) |
 
 ## License
 MIT, see [LICENSE](LICENSE).

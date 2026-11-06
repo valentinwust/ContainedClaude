@@ -15,6 +15,12 @@ USAGE = """containedclaude: Claude Code in a sandbox that can only write to one 
                                         --check: only compare with the latest; --no-pull: leave the clone
   containedclaude [run] [DIR] [-- claude args]
                                         start Claude in the sandbox for the project containing DIR (default: cwd)
+  containedclaude server [DIR] [-- args]
+                                        the Remote Control server in that sandbox (`claude remote-control`): it
+                                        starts contained sessions from claude.ai in the project folder (--spawn
+                                        same-dir; worktree mode is not supported), at most %d at once unless
+                                        args give --capacity N (they share the sandbox's limits), and none of
+                                        its own at start (--create-session-in-dir changes that); keep it in tmux
   containedclaude doctor [DIR] [--jobs] [--gpu] [--image SIF]
                                         verify the sandbox from the inside (interactive; --jobs: also as Slurm jobs)
   containedclaude test [DIR] [--jobs] [--build] [--gpu] [--image SIF] [--keep]
@@ -30,6 +36,30 @@ USAGE = """containedclaude: Claude Code in a sandbox that can only write to one 
                                         from its config and add missing .gitignore entries (caches, executed
                                         notebooks, CLAUDE_environment.md)
 """
+# sessions a Remote Control server runs at once: they share one sandbox's limits, and Claude Code's own default
+# (32) would need more processes+threads together than session_tasks allows
+SERVER_CAPACITY = 6
+USAGE %= SERVER_CAPACITY
+
+
+def server_args(args):
+    """`claude remote-control` with args, plus `--spawn same-dir` (worktree mode is not supported: README),
+    `--capacity SERVER_CAPACITY` and `--no-create-session-in-dir` (no session of its own at start: it would take
+    over the previous run's, which fails once that one is archived) unless args give their own or ask for a
+    mode in which Claude Code refuses them (--continue and --session-id refuse all three) or that they don't
+    fit (--spawn session refuses --capacity and is that one session)."""
+    names = [a.split("=", 1)[0] for a in args]
+    spawn = [a.partition("=")[2] or (args[i + 1] if i + 1 < len(args) else "")
+             for i, a in enumerate(args) if names[i] == "--spawn"]
+    if set(names) & {"-c", "--continue", "--session-id"}:
+        return ["remote-control"] + args
+    extra = [] if spawn else ["--spawn", "same-dir"]
+    if "session" not in spawn:
+        if "--capacity" not in names:
+            extra += ["--capacity", str(SERVER_CAPACITY)]
+        if not set(names) & {"--create-session-in-dir", "--no-create-session-in-dir"}:
+            extra.append("--no-create-session-in-dir")
+    return ["remote-control"] + extra + args
 
 
 def _root_or_fail(path):
@@ -82,7 +112,7 @@ def main(argv=None):
         print(USAGE)
         return 0
     cmd = argv.pop(0) if argv and argv[0] in ("init", "run", "doctor", "test", "admin", "env", "shell",
-                                              "add-write", "update") else "run"
+                                              "add-write", "update", "server") else "run"
 
     claude_args = []
     if "--" in argv:
@@ -204,7 +234,7 @@ def main(argv=None):
         if argv and looks_like_dir(argv[0]):
             target = argv.pop(0)
         return project.run(target, [], command=(argv + claude_args) or ["bash", "--norc", "-i"])
-    # run
+    # run, server (the Remote Control server: `claude remote-control`, which project.run recognises)
     if argv and looks_like_dir(argv[0]):
         target = argv.pop(0)
-    return project.run(target, argv + claude_args)
+    return project.run(target, server_args(argv + claude_args) if cmd == "server" else argv + claude_args)

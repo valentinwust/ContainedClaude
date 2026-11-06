@@ -2,8 +2,8 @@
 # `claude` / `codex` typed in a ContainedClaude project outside the sandbox ask first: Enter starts them
 # contained, u as usual. Everywhere else, inside sandboxes and for commands that start no agent, nothing
 # changes; without a terminal they only warn. `command claude` skips the question; `cclaude` / `ccodex` always
-# start contained. It covers this shell only (not IDEs or other programs): the notice in the project's
-# CLAUDE_environment.md stays the safety net.
+# start contained, `cclaude server` the Remote Control server. It covers this shell only (not IDEs or other
+# programs): the notice in the project's CLAUDE_environment.md stays the safety net.
 
 # subcommands and flags that start no agent here (from `claude --help`, `codex --help`)
 _ccg_claude=" -v --version -h --help agents attach auth auto-mode doctor gateway import install logs mcp "
@@ -23,7 +23,7 @@ _cc_guard_root() {      # the project containing the current folder (the launche
     done
 }
 
-_cc_contained() {       # _cc_contained claude|codex ARGS...: start it in the sandbox of the current folder
+_cc_contained() {       # _cc_contained claude|codex|server ARGS...: start it in the sandbox of the current folder
     if ! command -v containedclaude >/dev/null 2>&1; then
         printf 'containedclaude not found on PATH (install.sh links it into ~/.local/bin)\n' >&2
         return 127
@@ -32,6 +32,8 @@ _cc_contained() {       # _cc_contained claude|codex ARGS...: start it in the sa
     shift
     if [ "$tool" = claude ]; then
         containedclaude run -- "$@"
+    elif [ "$tool" = server ]; then
+        containedclaude server -- "$@"
     else
         containedclaude shell -- "$tool" "$@"
     fi
@@ -69,7 +71,11 @@ _cc_always() {          # `cclaude` / `ccodex`: contained (inside a sandbox it a
 
 function claude { _cc_guard claude "$@"; }
 function codex { _cc_guard codex "$@"; }
-function cclaude { _cc_always claude "$@"; }
+function cclaude {     # `cclaude server [args]`: the Remote Control server (`containedclaude server`)
+    if [ "${1:-}" != server ]; then _cc_always claude "$@"; return; fi
+    shift
+    if [ "${CONTAINEDCLAUDE:-}" = 1 ]; then command claude remote-control "$@"; else _cc_contained server "$@"; fi
+}
 function ccodex { _cc_always codex "$@"; }
 
 for _cc_t in claude codex; do
