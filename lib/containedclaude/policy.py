@@ -33,6 +33,7 @@ CACHE_VARS = {"XDG_CACHE_HOME": "", "PIP_CACHE_DIR": "pip", "CONDA_PKGS_DIRS": "
 # what a job without an image has and an image job gets too (apptainer --containall cleans the environment)
 IMAGE_ENV = ("USER", "LOGNAME", "MPLBACKEND", "HDF5_USE_FILE_LOCKING") + THREAD_VARS + tuple(CACHE_VARS)
 JUPYTER_RUNTIME_IN_SANDBOX = "/tmp/jupyter-runtime"   # sessions: the real one (~/.local/share/jupyter/runtime) is hidden
+ENVDOC = "CLAUDE_environment.md"           # on disk: a notice for agents outside; inside: envdoc_inside over it
 NSINIT = os.path.join(CLONE, "lib", "containedclaude", "nsinit.py")
 SYS_PYTHON = "/usr/bin/python3" if os.path.exists("/usr/bin/python3") else sys.executable
 
@@ -195,6 +196,11 @@ def _hide(p):
     if stat.S_ISDIR(st.st_mode):
         return ["--tmpfs", p]          # made read-only at the end (after binds below it are in place)
     return ["--ro-bind", "/dev/null", p]
+
+
+def envdoc_inside(cfg):
+    """What agents read as the project's CLAUDE_environment.md inside the sandbox (written by write_envdoc)."""
+    return os.path.join(cfg.contained_dir, "run", ENVDOC)
 
 
 def pinned_dirs(paths, roots):
@@ -526,8 +532,11 @@ def bwrap_args(cfg, mode, sock_dir=None, scratch=None, gpu=False, chdir=None, se
     protected = effective_protected(cfg)
     for d in pinned_dirs(protected, cfg.write_paths()):
         a += ["--bind", d, d]
+    envdoc, inside = os.path.join(cfg.project, ENVDOC), envdoc_inside(cfg)
     for p in protected:
-        a += ["--ro-bind", p, p]
+        # the sandbox description in place of the on-disk notice (without it the notice shows: the safe side)
+        src = inside if p == envdoc and os.path.isfile(inside) else p
+        a += ["--ro-bind", src, p]
 
     a += _shim_targets(SHIM_JOB if mode == "job" else SHIM_SESSION)
     # optional flags are detected from `bwrap --help` (compat.py) so a bwrap update can't break the start

@@ -25,8 +25,10 @@ USAGE = """containedclaude: Claude Code in a sandbox that can only write to one 
   containedclaude admin codex [args]    the same for Codex (its config, skills and plugins are read-only in projects)
   containedclaude shell [DIR] [-- cmd args]
                                         a shell (or command) in the same sandbox, with cc-* job commands working
-  containedclaude env [DIR]             regenerate DIR's CLAUDE_environment.md from its config and add missing
-                                        .gitignore entries (caches, executed notebooks, CLAUDE_environment.md)
+  containedclaude env [DIR]             regenerate DIR's CLAUDE_environment.md (a notice for agents outside the
+                                        sandbox; inside, .contained/run/CLAUDE_environment.md is shown in its place)
+                                        from its config and add missing .gitignore entries (caches, executed
+                                        notebooks, CLAUDE_environment.md)
 """
 
 
@@ -148,6 +150,7 @@ def main(argv=None):
             return project.admin([], command=argv + claude_args)
         return project.admin(claude_args + argv)
     if cmd == "env":
+        from . import policy
         from .config import Config
         root = _root_or_fail(argv[0] if argv else os.getcwd())
         if not root:
@@ -158,7 +161,8 @@ def main(argv=None):
             print("containedclaude: %s" % "; ".join(problems), file=sys.stderr)
             return 1
         project.write_envdoc(cfg)
-        print("wrote %s" % os.path.join(root, "CLAUDE_environment.md"))
+        print("wrote %s (the notice for agents outside the sandbox)\nwrote %s (what agents see there inside)" % (
+            os.path.join(root, policy.ENVDOC), policy.envdoc_inside(cfg)))
         project.ensure_gitignore(cfg)
         return 0
     target = os.getcwd()

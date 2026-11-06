@@ -68,8 +68,9 @@ Claude session with the contained config writable (still sandboxed). Remote Cont
 the same project.
 
 ## Inside: jobs and tools
-Agents learn the rules from `CLAUDE_environment.md`, which the launcher regenerates at every start and which
-`CLAUDE.md` imports:
+Agents learn the rules from `CLAUDE_environment.md`, which `CLAUDE.md` imports. On disk it tells an agent
+started without ContainedClaude that it is not contained; every sandbox shows the rules in its place
+(`.contained/run/CLAUDE_environment.md`, regenerated at every start):
 ```bash
 cc-run analysis.ipynb                           # a notebook as a job
 cc-run --cpus 16 --mem 64G -- samtools sort -@ 16 -o out.bam in.bam

@@ -16,8 +16,8 @@ from .config import (CLAUDE_CONFIG_DIR, CODEX_HOME, HOME, MARKER, SITE_DEFAULT, 
 
 TEMPLATES = os.path.join(CLONE, "templates")
 IMPORT_LINE = "@CLAUDE_environment.md"
-AGENTS_LINE = ("Read CLAUDE_environment.md, in the same folder as this file, first: it describes the sandbox you run "
-               "in and how to run jobs.")
+AGENTS_LINE = ("Read CLAUDE_environment.md, in the same folder as this file, first: it says whether you run in the "
+               "ContainedClaude sandbox and, if so, its rules.")
 # user settings copied into the contained Claude config on first setup (no hooks, status lines, helpers)
 SEED_KEYS = ["model", "effortLevel", "theme", "tui", "modelSettings", "autoContinueAtUsageLimit",
              "alwaysThinkingEnabled", "outputStyle", "language", "includeCoAuthoredBy", "cleanupPeriodDays"]
@@ -682,6 +682,9 @@ def refresh_stub(cfg, out=sys.stderr):
 
 
 def write_envdoc(cfg):
+    """The sandbox description goes to .contained/run/ (policy.envdoc_inside), which every sandbox mounts over
+    the project's CLAUDE_environment.md; on disk that file is a notice for agents started without
+    ContainedClaude. So an agent reads that it is sandboxed only when it is."""
     g = lambda k: cfg.get("jobs", k)
     bullets = lambda xs: "\n".join("- `%s`" % x for x in xs) or "- (none)"
     values = {
@@ -702,7 +705,10 @@ def write_envdoc(cfg):
         "session_cpus": policy.session_int(cfg, "session_cpus") or "all",
         "session_tasks": policy.session_int(cfg, "session_tasks") or "unlimited",
     }
-    safe_write(os.path.join(cfg.project, "CLAUDE_environment.md"), render("CLAUDE_environment.md", values))
+    inside = policy.envdoc_inside(cfg)
+    os.makedirs(os.path.dirname(inside), exist_ok=True)
+    safe_write(inside, render("CLAUDE_environment.md", values))
+    safe_write(os.path.join(cfg.project, policy.ENVDOC), render("CLAUDE_environment_outside.md", values))
 
 
 # ---- files that run code OUTSIDE the sandbox later: report changes after a session --------------------

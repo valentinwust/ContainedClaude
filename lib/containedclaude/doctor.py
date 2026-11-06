@@ -147,6 +147,20 @@ def shared_config_check(out):
     return report("shared config folders", results, out)
 
 
+def envdoc_check(cfg, out):
+    """On disk, the project's CLAUDE_environment.md must tell agents started without ContainedClaude that they
+    are not contained (every sandbox shows the description from .contained/run/ in its place)."""
+    try:
+        with open(os.path.join(cfg.project, policy.ENVDOC)) as fh:
+            head = fh.readline().strip()
+    except OSError as e:
+        head = "unreadable (%s)" % e.strerror
+    ok = head == "# Not in the ContainedClaude sandbox"
+    return report("agents outside the sandbox", [{
+        "check": "CLAUDE_environment.md on disk says it is not contained", "got": ok, "expect": True,
+        "detail": "the notice" if ok else "%s: start a session or run `containedclaude env`" % head[:50]}], out)
+
+
 def late_automount_check(cfg):
     """An autofs path NOT mounted at start must stay invisible (it would otherwise arrive writable)."""
     mounted = set()
@@ -287,6 +301,7 @@ def doctor(project, jobs=False, gpu=False, image=None, out=sys.stdout):
     try:
         ok = session_probe(cfg, out, sb)
         ok &= shared_config_check(out)
+        ok &= envdoc_check(cfg, out)
         if jobs or gpu:
             ok &= job_probes(cfg, out, gpu=gpu, image=image, real_sbatch=sb)
     finally:

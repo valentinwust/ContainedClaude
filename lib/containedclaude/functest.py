@@ -20,6 +20,7 @@ import urllib.request
 
 ARGS = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
 PROJECT = os.environ.get("CONTAINEDCLAUDE_PROJECT", os.getcwd())
+ENVDOC_HEADING = "# Environment: ContainedClaude sandbox"     # first line of templates/CLAUDE_environment.md
 CLONE = os.environ.get("CONTAINEDCLAUDE_CLONE", "")
 PULL_URI = "docker://quay.io/biocontainers/seqtk:1.4--he4a0461_2"   # small, glibc-based
 
@@ -257,9 +258,12 @@ def session_checks(td):
         check("a new folder of the shared config (tool update) is per project",
               with_project([("claude/" + n, os.path.join(cfgdir, n))]))
     def envdoc():
-        assert os.path.isfile(os.path.join(PROJECT, "CLAUDE_environment.md")), "CLAUDE_environment.md missing"
+        text = read(os.path.join(PROJECT, "CLAUDE_environment.md"))
+        assert text.startswith(ENVDOC_HEADING), "it is not the sandbox description: " + text.splitlines()[0][:70]
+        assert text == read(os.path.join(PROJECT, ".contained", "run", "CLAUDE_environment.md")), \
+            "differs from .contained/run/CLAUDE_environment.md"
         assert "@CLAUDE_environment.md" in read(os.path.join(PROJECT, "CLAUDE.md")), "CLAUDE.md lacks the import"
-        return "CLAUDE.md imports CLAUDE_environment.md"
+        return "the sandbox description in place of the notice, imported by CLAUDE.md"
     check("agents get the environment description", envdoc)
     codex = shutil.which("codex")
     def codex_sandbox():
@@ -331,7 +335,8 @@ def job_checks(td):
     probe = ("set -e; hostname > node; head -c 10 ~/.bashrc >/dev/null 2>&1 || ls ~ >/dev/null; echo home > home_ok; "
              "d=$(mktemp -d); dd if=/dev/zero of=$d/x bs=1M count=64 status=none; rm -r $d; "
              "df -Pk /tmp | awk 'NR==2{print int($4/1048576)}' > scratch_gb; "
-             "command -v apptainer > apptainer_path; echo \"$CC_TEST_VAR\" > env_ok; echo marker-from-job")
+             "command -v apptainer > apptainer_path; echo \"$CC_TEST_VAR\" > env_ok; "
+             "head -n 1 \"$CONTAINEDCLAUDE_PROJECT/CLAUDE_environment.md\" > envdoc_head; echo marker-from-job")
     t = time.time()
     ids = {}
     try:
@@ -383,6 +388,8 @@ def job_checks(td):
           and "%s GB free" % read(os.path.join(td, "scratch_gb")))
     check("apptainer available in jobs", lambda: wait_file(os.path.join(td, "apptainer_path"))
           and read(os.path.join(td, "apptainer_path")))
+    check("job sees the sandbox description", lambda: wait_file(os.path.join(td, "envdoc_head"))
+          and read(os.path.join(td, "envdoc_head")) == ENVDOC_HEADING and "CLAUDE_environment.md")
     check("--env reaches the job", lambda: wait_file(os.path.join(td, "env_ok"))
           and read(os.path.join(td, "env_ok")) == "inside_ok" and "CC_TEST_VAR set")
     check("array job (3 tasks)", lambda: all(wait_file(os.path.join(td, "arr_%d" % i)) for i in (1, 2, 3)) and "1-3")

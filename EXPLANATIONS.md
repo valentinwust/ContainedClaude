@@ -150,7 +150,11 @@ message instead of "read-only file system", and a hook after each command says s
 the session's memory limit (instead of a bare `Killed`). None of these is a security boundary; the sandbox is.
 
 **How agents learn the rules.** `CLAUDE_environment.md` is regenerated at every start from the current
-config, with the actual paths, limits and defaults filled in. `CLAUDE.md` imports it with
+config, with the actual paths, limits and defaults filled in. On disk it holds only a notice that tells an
+agent started without ContainedClaude that it is not contained and that the user should start it with
+`containedclaude`; every sandbox (sessions, shells, jobs) mounts the real description from
+`.contained/run/CLAUDE_environment.md` read-only in its place. So an agent reads that it is sandboxed only
+when it is. `CLAUDE.md` imports it with
 `@CLAUDE_environment.md` as its first line, which Claude Code loads at startup for the main session and
 sub-agents; `CLAUDE.md` is writable (agents edit it), so the launcher puts that line back at every start. Codex
 reads `AGENTS.md`, which points to it. Besides the rules it tells the agent what to suggest when something is

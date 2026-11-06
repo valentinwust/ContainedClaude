@@ -73,7 +73,8 @@ sandbox/shim                   stand-in bound over sbatch/ssh/apptainer/... insi
 sandbox/hooks/write_guard.py   Claude PreToolUse hook for Write/Edit/...: path-based explanation only
 sandbox/hooks/oom_notice.py    Claude PostToolUse hook for Bash: tells the agent when the session's memory
                                scope killed a process (reads the scope's memory.events)
-templates/                     config.ini, contained_claude.sh (project stub), CLAUDE_environment.md
+templates/                     config.ini, contained_claude.sh (project stub), CLAUDE_environment.md (the
+                               sandbox description), CLAUDE_environment_outside.md (the notice on disk)
 site.curry.ini                 committed curry defaults; copied to site.ini by install.sh / init if missing
 site.example.ini / site.ini    generic template / the active local copy (gitignored)
 install.sh [TEMPLATE]          symlink bin/containedclaude into ~/.local/bin, create site.ini (default from
@@ -91,13 +92,15 @@ DIR/.contained/config.ini      project config (read-only inside sandbox)
 DIR/.contained/{logs,run,state,VERSION,.gitignore,backup-*}
    logs/<name>_<jobid>.out     Slurm output (written by slurmd OUTSIDE the sandbox -> must be in a ro folder)
    run/settings.json           Claude --settings file (hooks), run/mcp.json (empty MCP config)
+   run/CLAUDE_environment.md   the sandbox description, bound read-only over DIR/CLAUDE_environment.md inside
    run/jobs/<stamp>_<name>.{json,sh}  job spec + generated batch script
    state/jobs.tsv              jobid, name, gpu, time, spec: ownership record for cancel/after/usage
    state/owner                 the user who ran init (the only owner check; state/ is gitignored)
    state/changes-<date>.txt    the change report of each session (§3 step 9)
    state/marked_write_paths    the project's root, then the write paths whose marker has its line (§3 step 1)
    state/{claude,codex}/       the project's entries of the shared config folders (§5.7)
-DIR/CLAUDE_environment.md      rendered at every start (read-only inside)
+DIR/CLAUDE_environment.md      rendered at every start: on disk a notice that the agent is NOT contained;
+                               inside, run/CLAUDE_environment.md in its place (read-only)
 DIR/CLAUDE.md                  gets "@CLAUDE_environment.md" as its FIRST line (Claude's import syntax; put
                                back at every start)
 DIR/AGENTS.md                  gets a pointer line (Codex reads AGENTS.md; no import syntax there)
@@ -165,8 +168,9 @@ memory, history, session records, shell snapshots, Codex rollouts, ...) are boun
    "trusted"` itself (TOML basic-string escaping) for the project, its git top folder (_git_top: Codex trusts
    the repository root inside a repo) and every nested repository (cfg.git_dirs), each only if its header is
    missing; skipped if config.toml has an inline `projects =` table.
-4. write_envdoc, refresh_stub (rewrites .contained_claude.sh if it differs from the template, so fixes to it
-   reach old projects), ensure_import_line (`@CLAUDE_environment.md` back as the FIRST line of CLAUDE.md, which
+4. write_envdoc (the description to run/CLAUDE_environment.md, the outside notice to DIR/), refresh_stub
+   (rewrites .contained_claude.sh if it differs from the template, so fixes to it reach old projects),
+   ensure_import_line (`@CLAUDE_environment.md` back as the FIRST line of CLAUDE.md, which
    agents rewrite), tracked_protected_note (one line if a git-tracked protected file differs between HEAD and
    another local branch: git can't rewrite it inside), run/settings.json (PreToolUse hook -> write_guard.py,
    PostToolUse Bash hook -> oom_notice.py), run/mcp.json.
@@ -317,7 +321,10 @@ Order matters: later mounts cover earlier ones.
    `--ro-bind p p` for policy.effective_protected: the EXISTING protected paths (DEFAULT_PROTECT + protect_paths +
    nested/submodule ones; see §7.3) with symlinks resolved on the host side and only those inside a writable
    area. bwrap binds by path: a relative link in the path would protect the link instead of its target, and an
-   absolute one made bwrap fail to start (fixture in doctor.make_fixture covers both).
+   absolute one made bwrap fail to start (fixture in doctor.make_fixture covers both). DIR/CLAUDE_environment.md
+   gets policy.envdoc_inside (run/CLAUDE_environment.md) as its source instead, when that exists; without it
+   the outside notice shows, the safe side. test checks the description inside (session and job), doctor the
+   notice on disk.
 8. shims: `--ro-bind sandbox/shim <realpath of each command found on the user's original PATH>`.
 9. `--dir /tmp/jupyter-runtime` in sessions (/tmp/.xdg-runtime is the project's runtime folder there, kept by
    nsinit; jobs get an empty `--dir /tmp/.xdg-runtime`), remount-ro hidden dirs, `--unshare-pid` in jobs only
