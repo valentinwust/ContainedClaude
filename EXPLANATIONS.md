@@ -36,7 +36,8 @@ compute node, so a job can't do anything the interactive session couldn't.
 | Typing into your terminal after the session (TIOCSTI) | no | seccomp filter |
 | Gaining privileges via setuid programs (`sudo`, …) | no | no-new-privileges |
 | Seeing or signalling your other processes | no | own process namespace |
-| Talking to your other Claude sessions (`ListAgents`, `SendMessage`, teammates) | same project only | the session sockets and records live in a per-project folder; other projects, other users and unsandboxed sessions have other folders, and the sockets of other users are unreachable by permissions anyway. Every session's pid namespace starts at a random number, so two sessions never register under the same pid (Claude names those files after it) |
+| Talking to your other Claude sessions (`ListAgents`, `SendMessage`, teammates) | same project only | with Remote Control on, Claude Code also lists the account's Remote Control sessions: a hook refuses sends to them and doesn't deliver their messages (a separate claude.ai account for the contained config separates them fully). The session sockets and records live in a per-project folder; other projects, other users and unsandboxed sessions have other folders, and the sockets of other users are unreachable by permissions anyway. Every session's pid namespace starts at a random number, so two sessions never register under the same pid (Claude names those files after it) |
+| Scheduled cloud routines (`RemoteTrigger`) | no | denied in the session's settings: routines run in the cloud with the account's connectors |
 | Internet | yes | Claude needs it. See "Not covered" |
 | Quick commands (grep, head, small Python) | yes | heavy work should go to jobs (a rule in CLAUDE_environment.md, not enforced) |
 
@@ -113,9 +114,14 @@ are invisible inside rather than unsafe.
 hooks, plugins, skills, agents, commands, rules and `CLAUDE.md` are read-only, so one project's agent can't
 change how other projects' sessions behave. The launcher creates them empty if missing, because only existing
 paths can be made read-only. Its `.claude.json` must stay writable (Claude rewrites it constantly), so the
-launcher starts Claude with `--strict-mcp-config` and an empty server list: MCP servers configured there are
-ignored. Per-project entries in it (for example allowed tools) can still be changed by any contained
-project's agent; they only affect sessions that are sandboxed too. Change settings or install plugins with
+launcher starts Claude with `--strict-mcp-config` and an empty server list: MCP servers configured there and
+claude.ai connectors are not used (`mcp_from_user_config = yes` in the project config turns this off). What
+Claude reads in the sandbox as the config's `settings.json` is that file with the launcher's hooks and rules
+added, so every Claude process there has them, also the sessions `claude remote-control` starts (which get no
+launcher flags; for them `allowedMcpServers: []` and `disableClaudeAiConnectors` in those settings keep MCP
+off). Per-project entries in
+`.claude.json` (for example allowed tools) can still be changed by any contained project's agent; they only
+affect sessions that are sandboxed too. Change settings or install plugins with
 `containedclaude admin`, whose fixed working folder the launcher marks as trusted. Codex gets its own
 `CODEX_HOME` the same way: its `config.toml`, `hooks.json`, `AGENTS.md`, rules, prompts, skills, plugins and
 packages are read-only in sessions (`containedclaude admin codex` changes them). The launcher writes the
@@ -147,7 +153,9 @@ for the plugin's reviews) the `cc-*` commands stay blocked by Codex itself.
 triggers when the command is actually run, never because a word appears in a heredoc, a document or a grep
 pattern. A Write/Edit hook compares only the target *path* with the writable areas, to give a clear
 message instead of "read-only file system", and a hook after each command says so when a process was killed by
-the session's memory limit (instead of a bare `Killed`). None of these is a security boundary; the sandbox is.
+the session's memory limit (instead of a bare `Killed`). A hook on messages between sessions keeps them within
+the project when Remote Control makes other sessions visible. None of these is a security boundary; the
+sandbox is.
 
 **How agents learn the rules.** `CLAUDE_environment.md` is regenerated at every start from the current
 config, with the actual paths, limits and defaults filled in. On disk it holds only a notice that tells an

@@ -77,6 +77,8 @@ sandbox/shim                   stand-in bound over sbatch/ssh/apptainer/... insi
 sandbox/hooks/write_guard.py   Claude PreToolUse hook for Write/Edit/...: path-based explanation only
 sandbox/hooks/oom_notice.py    Claude PostToolUse hook for Bash: tells the agent when the session's memory
                                scope killed a process (reads the scope's memory.events)
+sandbox/hooks/peer_guard.py    Claude UserPromptSubmit + PreToolUse SendMessage hook: messages between sessions
+                               only within the project (§5.10)
 templates/                     config.ini, contained_claude.sh (project stub), CLAUDE_environment.md (the
                                sandbox description), CLAUDE_environment_outside.md (the notice on disk)
 site.curry.ini                 committed curry defaults; copied to site.ini by install.sh / init if missing
@@ -99,7 +101,9 @@ DIR/.contained_claude.sh       stub: exec <clone>/bin/containedclaude run <its o
 DIR/.contained/config.ini      project config (read-only inside sandbox)
 DIR/.contained/{logs,run,state,VERSION,.gitignore,backup-*}
    logs/<name>_<jobid>.out     Slurm output (written by slurmd OUTSIDE the sandbox -> must be in a ro folder)
-   run/settings.json           Claude --settings file (hooks), run/mcp.json (empty MCP config)
+   run/user-settings.json      the contained config's settings.json plus the launcher's (§3, 4), read-only over
+                               it inside the project's sandbox
+   run/mcp.json                empty MCP config (--mcp-config); run/settings.json: admin's --settings file
    run/CLAUDE_environment.md   the sandbox description, bound read-only over DIR/CLAUDE_environment.md inside
    run/jobs/<stamp>_<name>.{json,sh}  job spec + generated batch script
    state/jobs.tsv              jobid, name, gpu, time, spec: ownership record for cancel/after/usage
@@ -176,13 +180,23 @@ memory, history, session records, shell snapshots, Codex rollouts, ...) are boun
    "trusted"` itself (TOML basic-string escaping) for the project, its git top folder (_git_top: Codex trusts
    the repository root inside a repo) and every nested repository (cfg.git_dirs), each only if its header is
    missing; skipped if config.toml has an inline `projects =` table.
-4. write_envdoc (the description to run/CLAUDE_environment.md, the outside notice to DIR/; each written only
+4. write_session_settings: run/user-settings.json (0600) = the contained config's settings.json (a JSON object
+   with hooks and permissions in a form Claude Code reads, else the start is refused) plus claude_settings
+   (PreToolUse hook -> write_guard.py, PreToolUse SendMessage + UserPromptSubmit -> peer_guard.py, PostToolUse
+   Bash hook -> oom_notice.py, permissions.deny RemoteTrigger) and `allowedMcpServers: []` plus
+   `disableClaudeAiConnectors: true` unless mcp_from_user_config (without the second, every session `claude
+   remote-control` starts warns about the blocked connectors on stderr, and the server shows that warning in
+   place of the session's real error); the user's own entries stay, written only when it changed. bwrap
+   binds it read-only over claude-config/settings.json, so every Claude process in the sandbox has these
+   settings, the sessions `claude remote-control` starts included (they get no launcher flags). The doctor
+   writes it too.
+   write_envdoc (the description to run/CLAUDE_environment.md, the outside notice to DIR/; each written only
    when it changed, so the project's running sessions keep their description at another start), refresh_stub
    (rewrites .contained_claude.sh if it differs from the template, so fixes to it reach old projects),
    ensure_import_line (`@CLAUDE_environment.md` back as the FIRST line of CLAUDE.md, which
    agents rewrite), tracked_protected_note (one line if a git-tracked protected file differs between HEAD and
-   another local branch: git can't rewrite it inside), run/settings.json (PreToolUse hook -> write_guard.py,
-   PostToolUse Bash hook -> oom_notice.py), run/mcp.json.
+   another local branch: git can't rewrite it inside). Admin instead: run/settings.json (claude_settings).
+   Both: run/mcp.json (empty).
    updates.notice: once a day (STATE/update-check.json) the clone's HEAD vs its upstream (git fetch, 15 s,
    GIT_TERMINAL_PROMPT=0, only if .git is writable) and installed vs npm-latest of claude/codex, WARNING if
    behind; `containedclaude update` = updates.update_all: updates.pull_clone (git pull --ff-only; skipped
@@ -224,9 +238,10 @@ memory, history, session records, shell snapshots, Codex rollouts, ...) are boun
    --tmp-size <tmp_size> --pid-base <random> --keep <runtime>/xdg /tmp/.xdg-runtime --keep
    /tmp/containedclaude-<uid>-XXXX /tmp/.containedclaude -- /usr/bin/bwrap <policy, /tmp /var/tmp /dev/shm
    re-bound rw, /tmp/.containedclaude ro, the project's entries of claude-config and codex-home bound over
-   (project_store), no --unshare-pid> -- claude --settings run/settings.json --mcp-config run/mcp.json --strict-mcp-config
-   <user args>` with a cleaned env (plus the host's XDG_RUNTIME_DIR, which systemd-run needs to reach the user
-   manager; bwrap --setenv puts the sandbox value back inside; see §5.9 for the scope), SIGINT ignored
+   (project_store), run/user-settings.json over claude-config/settings.json, no --unshare-pid> -- claude
+   --mcp-config run/mcp.json --strict-mcp-config <user args>` with a cleaned env (plus the host's
+   XDG_RUNTIME_DIR, which systemd-run needs to reach the user manager; bwrap --setenv puts the sandbox value
+   back inside; see §5.9 for the scope), SIGINT ignored
    in the launcher (Claude handles Ctrl-C itself; the launcher must survive to stop the broker). SIGHUP/SIGTERM
    (ssh connection dropped, kill) are forwarded to bwrap, so the cleanup below still runs.
 9. After exit: stop broker, remove socket dir, report_changes (warn about created/changed protected files; also
@@ -237,10 +252,14 @@ fixed folder STATE/admin as the project (config.ini rewritten at each start, wri
 claude-config, no start_problems checks) and the config's ro sub-binds dropped (mode "admin") -> /login, plugin
 installs, settings changes; `admin codex` runs Codex there instead of Claude (its config.toml, skills,
 plugins, ... writable; bundled skills are only refreshed there). project.trust_folder writes projects[ADMIN_DIR].hasTrustDialogAccepted = true into
-the contained .claude.json first (if it exists and parses), so the trust dialog never comes up there. The
-launcher's claude flags are `--settings F --mcp-config F --strict-mcp-config`: --mcp-config is variadic and the
-boolean after it ends the list, so a subcommand in the user's args (`containedclaude admin -- plugin list`)
-works.
+the contained .claude.json first (if it exists and parses), so the trust dialog never comes up there. Admin's
+settings.json is the real one, so it gets the launcher's settings as a flag: `--settings F --mcp-config F
+--strict-mcp-config`; project sessions get only the MCP flags (their settings come from settings.json, step 4,
+so hooks don't run twice). --mcp-config is variadic and the boolean after it ends the list, so a subcommand in
+the user's args (`containedclaude admin -- plugin list`) works. `containedclaude -- remote-control` (the server
+for sessions started from claude.ai, as the first argument) gets no flags: Claude Code refuses to start it
+behind --mcp-config/--strict-mcp-config, and the sessions it starts get no flags anyway; they have the
+settings.json rules, `allowedMcpServers: []` included.
 
 ---------------------------------------------------------------------------------------------------------------
 ## 4. How a job runs
@@ -441,10 +460,13 @@ Consequences: transcripts and memory move and go with the project, `--resume`/`c
 project's sessions, and no session can read or edit another project's records or the files another
 project's session executes. What stays shared is documented as the residual in the limitations (§7.7-8).
 .claude.json must stay writable (Claude rewrites it constantly) and can contain MCP servers -> launcher passes
---strict-mcp-config + an empty --mcp-config, so MCP servers configured there are ignored (config `mcp_from_user_config =
-yes` to opt out). The user's `/login` happens once (first session or `containedclaude admin`). Plugins (e.g.
-codex) must be installed via `containedclaude admin` (plugins/ is ro in normal sessions). Admin mode gets the
-same per-project binds for its fixed folder (its own records), so it does not see other projects' either.
+--strict-mcp-config + an empty --mcp-config, and the session's settings.json has `allowedMcpServers: []` and
+`disableClaudeAiConnectors: true` (the rules the sessions `claude remote-control` starts have, §3), so no MCP
+server is used, claude.ai connectors
+included (config `mcp_from_user_config = yes` to opt out). The user's `/login` happens once (first session or
+`containedclaude admin`). Plugins (e.g. codex) must be installed via `containedclaude admin` (plugins/ is ro
+in normal sessions). Admin mode gets the same per-project binds for its fixed folder (its own records), so it
+does not see other projects' either.
 
 ### 5.8 The host side trusts no program a sandbox could have written
 Launcher, broker, jobwrap and the starter script run outside the sandbox and start programs (unshare, bwrap,
@@ -485,6 +507,29 @@ SLURM_CPUS_PER_TASK). nsinit is always the outer layer of sessions (--tmp-size 0
 not cappable unprivileged; CLAUDE_environment.md sends large transfers to jobs. doctor checks pids.max,
 affinity count and niceness.
 
+### 5.10 Messages between sessions (sandbox/hooks/peer_guard.py)
+Without Remote Control a contained session finds only the sessions of its project (the per-project runtime
+folder, §3). With Remote Control on (`--remote-control`, `/remote-control`), Claude Code also lists the
+account's Remote Control sessions (ListAgents type remote_control) and messages them over Remote Control.
+peer_guard.py (in the session's settings.json, §3, 4) keeps messages within the project:
+- UserPromptSubmit: a prompt that starts with `<cross-session-message ...>` is blocked ({"decision":
+  "block"}) unless the from= of every such header is a local socket (`uds:`, `/....sock`) or `sid:` with a
+  session id of this project. The user sees "blocked by hook" with the reason; the model gets nothing (the
+  transcript has only the queue entry and that notice). Local messages pass.
+- PreToolUse SendMessage: allowed are recipient_kind main and agent, the reserved names main, team-lead, user,
+  system, local socket addresses, the names of this project's running sessions (records in
+  $CLAUDE_CONFIG_DIR/sessions whose socket accepts a connection: killed sessions leave their records behind),
+  their refs (6 to 12 hex digits of sha256("session:<socket>"), or of "session:sid:<session id>"), and this
+  session's agents (Agent/Task calls' input.name and agentId in the transcript) and teammates
+  (teams/*/config.json members). Anything else is denied with a text that says what to do. A name shared by a
+  local and a remote session is refused by Claude Code itself ("2 agents are named ..."); the ref decides then.
+- permissions.deny RemoteTrigger: the tool is gone from the session (routines run in the cloud with the
+  account's connectors).
+Like the other hooks this is not a boundary (§1); a separate claude.ai account for the contained config
+separates contained sessions from the user's others completely. The sessions `claude remote-control` starts
+read the same settings.json, so all of this applies there too. Locally they are listed under a derived name
+(`t1-55` in a folder t1); `--name` names only the server's Remote Control entry.
+
 ---------------------------------------------------------------------------------------------------------------
 ## 6. Version dependencies (what can break when tools update) and where to fix
 
@@ -493,12 +538,13 @@ affinity count and niceness.
 | bwrap >= 0.4 (curry 0.6.3) | --ro-bind --tmpfs --remount-ro --dir --seccomp --die-with-parent --unshare-cgroup-try | compat.py: BWRAP_REQUIRED missing -> refuse to start; BWRAP_OPTIONAL missing -> left out with a warning (--dir falls back to --tmpfs; no --seccomp = no TIOCSTI filter; no --remount-ro = hidden dirs writable in RAM). doctor prints `optional flags: ...` |
 | kernel namespaces via ctypes (nsinit.py) | unshare(CLONE_NEWUSER\|CLONE_NEWNS), uid_map/gid_map/setgroups, mount MS_REC\|MS_PRIVATE, tmpfs on /tmp (size=), MS_BIND of /tmp/.var-tmp, /tmp/.shm and /proc/self/fd/N (the kept folders); unshare(CLONE_NEWPID) + /proc/sys/kernel/ns_last_pid + a procfs remount, prctl(PR_SET_PDEATHSIG) | syscall ABI, stable; a failed mount or unshare stops the start with the errno (no fallback: a session without its private /tmp or pid namespace must not run). doctor: "own pid namespace" |
 | Claude Code session messaging | $XDG_RUNTIME_DIR/cc-socks/<pid>.sock, <config>/sessions/<pid>.json + <pid>.<hash>.key, record field pidDomain (pid namespace id; liveness falls back to the socket) | if the layout moves, sessions of one project stop seeing each other (ListAgents empty), nothing else; policy.project_runtime + "sessions" in CLAUDE_CONFIG_PER_RUNTIME are the two places |
+| Claude Code cross-session messages (2.1.319) | peer_guard.py: inbound prompt `<cross-session-message from="uds:...\|bridge:...\|did:..." from-name= from-mode=>` (UserPromptSubmit; its `source` field absent), SendMessage tool_input `to` + `recipient_kind` (main\|agent\|session\|name), "name [ref]", ref = sha256("session:<id>")[:6..12], session record fields name, sessionId, messagingSocketPath; reserved names main, team-lead, user, system | peer_guard stops recognising messages or recipients; test's check uses sample payloads and can't see that, the occasional manual check in §8 does |
 | Claude Code config folder layout (2.1.318) | projects/<cwd, non-alnum -> '-'>/<session>.jsonl + memory/, history.jsonl appended in place, shell-snapshots/, session-env/<session>/sessionstart-hook-N.sh, file-history/, plans/, ... (the lists in policy.py, taken from the binary's `(Ue(),"name")` joins); .claude.json and .credentials.json replaced by rename | a renamed or new entry is shared between projects until classified: doctor's "shared config folders" section names it (runs after every Claude update); `containedclaude test` checks that every per-project entry is its own mount inside |
 | Codex home layout (0.166.0) | sessions/YYYY/MM/DD/rollout-*.jsonl, archived_sessions/, history.jsonl and session_index.jsonl appended in place, shell_snapshots/<thread>.<ts>.sh, tmp/arg0-linux/codex-arg0*/{apply_patch,applypatch,codex-linux-sandbox}, state_N.sqlite thread index (cwd, rollout_path, title, first_user_message), skills/.system (bundled skills, marker file), app-server-control/ + app-server-daemon/ (background server; off) | same doctor section (patterns *.sqlite); `codex resume` of another project's thread fails (rollout not visible), the picker filters by cwd; a read-only skills/ only means the bundled skills update in `admin codex` |
 | Codex CLI (0.166.0) | its own sandbox = a bwrap + seccomp inner layer; needs /tmp to be a real mount (mount root "/") and, for sockets, `[sandbox_workspace_write] network_access = true` in CODEX_HOME/config.toml (seeded by ensure_state); `[features] daemon_auto_start = false` (seeded: otherwise the TUI copies its binary into packages/ and runs a background server); folder trust `[projects."<path>"] trust_level` (written by codex_trust; Codex can't write config.toml in sessions) | `containedclaude test` runs a command under `codex sandbox` (writes the project, reaches the broker); failure shows there and as "bwrap: Can't mkdir parents ..." or "broker not reachable (Operation not permitted)" in Codex output |
 | util-linux unshare (2.37.4), jobs | --user --map-current-user --mount --propagation private | compat.outer_unshare: falls back to --map-user=UID --map-group=GID (never -r: that maps to root) |
 | apptainer 1.5.5 | exec --userns --containall --workdir --home --pwd --nv --bind --env; build --fakeroot; pull | jobwrap: --userns/--containall/--workdir only if `apptainer exec --help` lists them (compat.likely: if --help is unreadable, pass everything as before); APPTAINER_USERNS=1 forces userns anyway. Security does not depend on these: the surrounding bwrap sandbox decides ro/rw |
-| Claude Code (2.1.318) | (project.run passes --settings / --strict-mcp-config --mcp-config only if `claude --help` lists them, else warns) --settings, --strict-mcp-config, --mcp-config, CLAUDE_CONFIG_DIR, DISABLE_AUTOUPDATER, hook JSON (tool_name, tool_input.file_path/notebook_path, exit 2 = block + stderr), @import in CLAUDE.md | check `claude --help`; config dir layout names in policy.CLAUDE_CONFIG_RO (missing names are skipped) |
+| Claude Code (2.1.319) | CLAUDE_CONFIG_DIR/settings.json read by every Claude process (user settings), also by the sessions `claude remote-control` starts (they inherit env and mounts, not flags; the server refuses to start behind --mcp-config/--strict-mcp-config); `allowedMcpServers: []` there hides every MCP server incl. claude.ai connectors, `disableClaudeAiConnectors: true` keeps the connectors from loading (else each session the server starts warns about them on stderr); the managed-settings folder is fixed at /etc/claude-code (no override in the public build); --settings (admin only), --strict-mcp-config, --mcp-config (not for the server; passed only if `claude --help` lists them, else warns), DISABLE_AUTOUPDATER, hook JSON (tool_name, tool_input.file_path/notebook_path, exit 2 = block + stderr), @import in CLAUDE.md | check `claude --help`; config dir layout names in policy.CLAUDE_CONFIG_RO (missing names are skipped) |
 | Slurm 26.05 | sbatch --parsable --comment; squeue -r -o "%F|%i|%j|%T|%M|%l|%C|%m|%b|%R|%k" (also for all users: cc-cluster); sacct -P (JobID, JobName, State, ElapsedRaw, AllocCPUS, TotalCPU, ReqMem, MaxRSS, ExitCode, NodeList; the .batch step for MaxRSS); sstat -P AveCPU,MaxRSS on <job>.batch; sinfo -N -O NodeList,Partition,StateCompact,CPUsState,Memory,AllocMem,Gres,GresUsed | format letters stable for decades; if %k (comment) breaks, ownership still works via state/jobs.tsv; MaxRSS needs jobacct_gather (cgroup here, 30 s samples); GresUsed strings like `shard:a40:8(8/32)` are parsed by cc's gpu_text |
 | claude / codex subcommands (lib/shell-guard.sh) | the shell guard's lists of subcommands that start no agent (`_ccg_claude`, `_ccg_codex`, from `--help`) | a new subcommand that starts no agent asks needlessly until listed; check the lists against `--help` after updates |
 | ssh to compute nodes (cc-gpu) | `ssh -n -o BatchMode=yes NODE nvidia-smi` from the broker with the user's key | if the site adds pam_slurm_adopt (ssh only with a job on the node) cc-gpu fails with the ssh error; nothing else depends on it |
@@ -549,10 +595,6 @@ Rule for changes: prefer feature detection over version numbers; fail closed for
     fresh `git init` reports its config/hooks/info only.
 13. The session memory scope needs a systemd user session on the login node (XDG_RUNTIME_DIR) and systemd >=
     243 (OOMPolicy=); otherwise no limit, with a warning at start.
-14. `claude remote-control` (server mode) creates sessions without the launcher's --settings / --strict-mcp-config
-    (Claude Code drops global flags for those sessions): no explanatory hooks, MCP servers of the contained
-    config active; the sandbox is unaffected. The launcher prints a note. `--remote-control` (flag) is a normal
-    session and gets everything.
 
 ---------------------------------------------------------------------------------------------------------------
 ## 8. Verification (re-run after every change)
@@ -593,6 +635,31 @@ the hint shows only while the line is missing (bash and zsh; none for other shel
 Description kept at another start (2026-11-06): `test` 29 ok; the new check reads the notice with the old
 write_envdoc and the description with the new one; `env` says "up to date" for unchanged files, recreates a
 deleted notice, and a config change reaches new sandboxes while a running one keeps its description.
+Messages within the project (2026-11-06, Claude Code 2.1.319): `test` 30 ok; three sessions in tmux (A and C
+with --remote-control, in two projects; B local in A's project): A -> B and B's reply delivered; A -> C by name
+and as "name [ref]" refused with the hook's text; a message from an unsandboxed Remote Control session to A
+not delivered (A's transcript: only the queue entry and the UI notice); RemoteTrigger missing from A's tools;
+records left by killed sessions don't count (their sockets don't answer).
+Server sessions (2026-11-06, Claude Code 2.1.319): `test` 31 ok, doctor passes; `containedclaude --
+remote-control` in a throwaway project (before: refused by Claude Code because of the launcher's MCP flags): a
+message from an unsandboxed session started a session there and was not delivered (blocked by hook); that
+session has no RemoteTrigger and no mcp__ tools; a local session B in the project: `/mcp` empty, messages to
+and from the server's session delivered, a send outside the project refused. With `mcp_from_user_config =
+yes` `claude mcp list` shows the account's claude.ai connectors, with `no` none. A normal session runs `claude
+--mcp-config F --strict-mcp-config <args>`, and its `/hooks` lists the launcher's hooks as user hooks.
+Connectors off (2026-11-06): a server-style session (`--print --resume=<id>` without a transcript) printed
+`No conversation found with session ID` followed by "claude.ai MCP servers blocked by enterprise policy",
+which the server showed as the session's failure; with `disableClaudeAiConnectors: true` only the real error.
+Occasional manual check of messages (by hand, e.g. after a larger Claude Code update; `test` and `update` stay
+short and don't run it): two throwaway projects P and Q; in tmux `containedclaude P -- --name t-A
+--remote-control`, `containedclaude Q -- --name t-C --remote-control`, `containedclaude P -- --name t-B`. Ask
+t-A to call ListAgents, then SendMessage to t-B, to t-C, and to t-C as "t-C [ref]": t-B gets its message,
+both sends to t-C are refused with peer_guard's text. From an unsandboxed session send one message to t-A: t-A
+shows "blocked by hook" and doesn't react. Server mode: `containedclaude P -- remote-control` (answer the
+trust question); one message to it from an unsandboxed session starts a session that shows "blocked by hook";
+t-B finds that session in ListAgents (under a name derived from P's folder) and can message it, and it
+reports no RemoteTrigger and no mcp__ tools. Afterwards remove the projects' lines from compat.REGISTRY and
+their trust entries from CODEX_HOME/config.toml, then the folders.
 
 ---------------------------------------------------------------------------------------------------------------
 ## 9. How to change common things
@@ -605,6 +672,11 @@ deleted notice, and a config change reaches new sandboxes while a running one ke
 - New functional check: functest.py (session_checks / job_checks; use check(name, fn), fn returns a detail
   string, ('skip', why), or raises). New blocking check: probe.py + doctor.probe_args.
 - Shell guard: lib/shell-guard.sh (the subcommand lists at the top); its test is functest's "shell guard".
+- Messages between sessions: sandbox/hooks/peer_guard.py (formats in §6); its test is functest's "messages
+  only within the project", plus the occasional manual check of messages in §8.
+- Launcher settings for Claude (hooks, denials, MCP rule): project.claude_settings / session_settings; they
+  reach sessions through the bound settings.json (§3, 4), admin through --settings; functest's "the
+  launcher's settings reach every Claude process" checks them.
 - New subcommand on the host: cli.py. New action for the sandbox: broker.Broker.handle + a cc-* entry.
 - Session memory limit: session_mem in site.ini / .contained/config.ini (0 = none); the scope properties are
   compat.SCOPE_PROPS.

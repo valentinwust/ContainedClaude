@@ -8,6 +8,7 @@ Everything happens in a temporary folder <project>/.cc_selftest_<stamp>/ that is
 Output is meant for humans: sections, one line per check (ok / FAIL / skip), timings, and a summary.
 Exit status 0 if nothing failed.
 """
+import hashlib
 import json
 import os
 import select
@@ -289,6 +290,38 @@ def session_checks(td):
         assert not missing, "shared, not per project: %s" % " ".join(missing)
         return "%d entries (incl. sessions, shell snapshots, hook env files) are own mounts" % len(names)
     check("per-project entries of the shared config are own mounts", own_mounts if cfgdir else lambda: False)
+    def launcher_settings():
+        # every Claude process here reads them from the config's settings.json (also the sessions `claude
+        # remote-control` starts, which get no launcher flags); the user's own settings stay
+        sys.path.insert(0, os.path.join(CLONE, "lib"))
+        from containedclaude import policy, project
+        from containedclaude.config import Config
+        cfg = Config(PROJECT)
+        st = json.loads(read(os.path.join(cfgdir, "settings.json")))
+        assert os.path.samefile(os.path.join(cfgdir, "settings.json"), policy.settings_inside(cfg)), \
+            "the config's settings.json is not the launcher's copy"
+        hooks = json.dumps(st.get("hooks"))
+        missing = [h for h in ("write_guard.py", "peer_guard.py", "oom_notice.py") if h not in hooks]
+        assert not missing and hooks.count("peer_guard.py") == 2, "hooks missing: %s" % " ".join(missing)
+        assert "RemoteTrigger" in st.get("permissions", {}).get("deny", []), "RemoteTrigger is not denied"
+        no_mcp = not cfg.bool("sandbox", "mcp_from_user_config")
+        assert (st.get("allowedMcpServers") == []) == no_mcp, "allowedMcpServers: %r" % st.get("allowedMcpServers")
+        assert st.get("disableClaudeAiConnectors") is True or not no_mcp, "claude.ai connectors are loaded"
+        mine = {"model": "m", "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": []}]},
+                "permissions": {"allow": ["Read"], "deny": ["WebFetch", "RemoteTrigger"]}}
+        got = project.session_settings(cfg, mine)
+        assert got["model"] == "m" and got["permissions"] == mine["permissions"] \
+            and got["hooks"]["PreToolUse"][0] == mine["hooks"]["PreToolUse"][0] \
+            and len(got["hooks"]["PreToolUse"]) == 3, "the user's own settings were not kept: %r" % got
+        for bad in ([], {"hooks": []}, {"hooks": {"Stop": {}}}, {"permissions": {"deny": "Bash"}}):
+            try:
+                project.session_settings(cfg, bad)
+            except ValueError:
+                continue
+            raise AssertionError("settings Claude Code does not read were accepted: %r" % bad)
+        return "hooks, RemoteTrigger denied, %s; the user's own settings kept" % (
+            "no MCP servers" if no_mcp else "MCP servers from the config")
+    check("the launcher's settings reach every Claude process", launcher_settings if cfgdir else lambda: False)
     if ARGS.get("unknown_folder") and cfgdir:     # made by `containedclaude test` on the host before the start
         n = ARGS["unknown_folder"]
         check("a new folder of the shared config (tool update) is per project",
@@ -347,6 +380,54 @@ def session_checks(td):
         assert rc(os.path.join(PROJECT, ".contained", "config.ini")) == 2, "lets a protected file through"
         return "lets project writes through, explains home and protected files"
     check("write hook", hook_ok)
+    def peer_guard():
+        # stand-in session records: one running (a listening socket), one gone; a transcript with an own agent
+        d = tempfile.mkdtemp(dir="/tmp")
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock, gone = os.path.join(d, "1.sock"), os.path.join(d, "2.sock")
+            srv.bind(sock)
+            srv.listen(4)
+            os.makedirs(os.path.join(d, "sessions"))
+            for n, name, path in (("1", "proj-peer", sock), ("2", "gone-peer", gone)):
+                with open(os.path.join(d, "sessions", n + ".json"), "w") as fh:
+                    json.dump({"name": name, "sessionId": "sid-" + n, "messagingSocketPath": path}, fh)
+            transcript = os.path.join(d, "t.jsonl")
+            with open(transcript, "w") as fh:
+                fh.write(json.dumps({"message": {"content": [{"type": "tool_use", "name": "Agent",
+                                                               "input": {"name": "helper"}}]}}) + "\n")
+            env = dict(os.environ, CLAUDE_CONFIG_DIR=d)
+            guard = os.path.join(CLONE, "sandbox", "hooks", "peer_guard.py")
+            def verdict(payload):
+                out = subprocess.run([sys.executable, "-I", guard], input=json.dumps(payload), env=env,
+                                     universal_newlines=True, stdout=subprocess.PIPE, timeout=30).stdout
+                r = json.loads(out) if out.strip() else {}
+                return ("blocked" if r.get("decision") == "block" or
+                        (r.get("hookSpecificOutput") or {}).get("permissionDecision") == "deny" else "passed")
+            msg = '<cross-session-message from="%s" from-name="x" from-mode="prompting">\nhi\n</cross-session-message>'
+            prompts = [("hello", "passed"), (msg % ("uds:" + sock), "passed"), (msg % "bridge:session_x", "blocked"),
+                       (msg % "did:x", "blocked"), ("about " + msg % "bridge:session_x", "passed")]
+            ref = hashlib.sha256(("session:" + sock).encode()).hexdigest()       # as ListAgents shows it
+            sends = [("main", "main", "passed"), ("team-lead", "name", "passed"),
+                     ("a1b2c3d4e5f6a7b8", "agent", "passed"),
+                     ("proj-peer", "name", "passed"), ("proj-peer [%s]" % ref[:6], "name", "passed"),
+                     (ref[:8], "name", "passed"), ("helper", "name", "passed"), ("uds:" + sock, "session", "passed"),
+                     ("gone-peer", "name", "blocked"), ("someone-else", "name", "blocked"),
+                     ("someone-else [484611]", "name", "blocked"), ("bridge:session_x", "session", "blocked"),
+                     ("local_0123456789ab", "session", "blocked")]
+            wrong = ["prompt %r: %s" % (p[:40], got) for p, want in prompts
+                     for got in [verdict({"hook_event_name": "UserPromptSubmit", "prompt": p})] if got != want]
+            wrong += ["to %r: %s" % (to, got) for to, kind, want in sends
+                      for got in [verdict({"hook_event_name": "PreToolUse", "tool_name": "SendMessage",
+                                           "transcript_path": transcript,
+                                           "tool_input": {"to": to, "recipient_kind": kind, "message": "hi"}})]
+                      if got != want]
+            assert not wrong, "; ".join(wrong)
+        finally:
+            srv.close()
+            shutil.rmtree(d, ignore_errors=True)
+        return "%d messages in, %d sends out as expected" % (len(prompts), len(sends))
+    check("messages only within the project (peer_guard)", peer_guard)
     def shell_guard():
         fake = os.path.join(td, "guardbin")
         os.makedirs(fake)

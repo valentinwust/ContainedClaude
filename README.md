@@ -71,8 +71,10 @@ Contained sessions have their own Claude config, shared by all contained project
 session. Transcripts, memory and prompt history stay with the project (`.contained/state/`). Settings,
 plugins and skills of that config are read-only in projects. Change them with `containedclaude admin`, a
 Claude session with the contained config writable (still sandboxed). Remote Control works
-(`-- --remote-control`; keep the session running in tmux), and session messaging works between sessions of
-the same project.
+(`-- --remote-control`, or `-- remote-control` for the server that starts sessions from claude.ai; keep it
+running in tmux). Contained sessions exchange messages
+(`SendMessage`) only with the other sessions of their project and their own agents, also with Remote Control
+on, and don't create cloud routines (`RemoteTrigger`).
 
 ## Inside: jobs and tools
 Agents learn the rules from `CLAUDE_environment.md`, which `CLAUDE.md` imports. On disk it tells an agent

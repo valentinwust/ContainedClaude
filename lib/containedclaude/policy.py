@@ -203,6 +203,12 @@ def envdoc_inside(cfg):
     return os.path.join(cfg.contained_dir, "run", ENVDOC)
 
 
+def settings_inside(cfg):
+    """What Claude reads as the contained config's settings.json inside the project's sandbox: that file with
+    the launcher's settings added (written by project.write_session_settings)."""
+    return os.path.join(cfg.contained_dir, "run", "user-settings.json")
+
+
 def pinned_dirs(paths, roots):
     """The folders between the writable root a protected path lies in and the path itself (<project>/.git for
     .git/config; sub, sub/.git for sub/.git/config). Bound onto themselves (writable, as before) they become mount
@@ -517,9 +523,12 @@ def bwrap_args(cfg, mode, sock_dir=None, scratch=None, gpu=False, chdir=None, se
         for d in (CLAUDE_CONFIG_DIR, CODEX_HOME if cfg.bool("sandbox", "codex") else None):
             if d and os.path.isdir(d):
                 a += ["--bind", d, d]
+        # settings.json: with the launcher's settings added, for every Claude process in the sandbox (also the
+        # sessions `claude remote-control` starts, which get none of the launcher's flags)
+        settings = os.path.join(CLAUDE_CONFIG_DIR, "settings.json")
         for p in config_ro(cfg, mode):
             if _exists(p):
-                a += ["--ro-bind", p, p]
+                a += ["--ro-bind", settings_inside(cfg) if p == settings else p, p]
         for rel in CLAUDE_CONFIG_RW_UNDER_RO:
             p = os.path.join(CLAUDE_CONFIG_DIR, rel)
             if os.path.isdir(p):

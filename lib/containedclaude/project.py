@@ -795,14 +795,56 @@ def report_changes(cfg, before, after, out=sys.stderr):
 def claude_settings(cfg):
     py = sys.executable or "python3"
     hook = lambda name: os.path.join(CLONE, "sandbox", "hooks", name)
-    return {"hooks": {
-        "PreToolUse": [{"matcher": "Write|Edit|MultiEdit|NotebookEdit",
-                        "hooks": [{"type": "command", "command": "%s -I %s" % (py, hook("write_guard.py")),
-                                   "timeout": 10}]}],
-        # after a command: tell the agent when a process was killed by the session memory limit
-        "PostToolUse": [{"matcher": "Bash",
-                         "hooks": [{"type": "command", "command": "%s -I %s" % (py, hook("oom_notice.py")),
-                                    "timeout": 10}]}]}}
+    cmd = lambda name: [{"type": "command", "command": "%s -I %s" % (py, hook(name)), "timeout": 10}]
+    return {
+        "hooks": {
+            "PreToolUse": [{"matcher": "Write|Edit|MultiEdit|NotebookEdit", "hooks": cmd("write_guard.py")},
+                           # messages only to the sessions of this project and the session's own agents
+                           {"matcher": "SendMessage", "hooks": cmd("peer_guard.py")}],
+            # and only from the sessions of this project
+            "UserPromptSubmit": [{"hooks": cmd("peer_guard.py")}],
+            # after a command: tell the agent when a process was killed by the session memory limit
+            "PostToolUse": [{"matcher": "Bash", "hooks": cmd("oom_notice.py")}]},
+        # routines run in the cloud with the account's connectors, outside the sandbox
+        "permissions": {"deny": ["RemoteTrigger"]}}
+
+
+def session_settings(cfg, user):
+    """The contained config's settings (`user`, parsed) with claude_settings added, plus no MCP servers unless
+    mcp_from_user_config: what Claude reads as that settings.json in the project's sandbox. Every Claude
+    process there gets them, also the sessions `claude remote-control` starts, which get none of the
+    launcher's flags. The user's own entries stay. ValueError if hooks or permissions have a form Claude Code
+    does not read."""
+    if not isinstance(user, dict):
+        raise ValueError("it is not a JSON object")
+    hooks, perms = user.get("hooks", {}), user.get("permissions", {})
+    if not (isinstance(hooks, dict) and all(isinstance(v, list) for v in hooks.values()) and isinstance(perms, dict)
+            and isinstance(perms.get("deny", []), list)):
+        raise ValueError("its hooks or permissions have a form Claude Code does not read")
+    ours, out = claude_settings(cfg), dict(user)
+    out["hooks"] = dict(hooks, **{e: hooks.get(e, []) + h for e, h in ours["hooks"].items()})
+    deny = perms.get("deny", [])
+    out["permissions"] = dict(perms, deny=deny + [r for r in ours["permissions"]["deny"] if r not in deny])
+    if not cfg.bool("sandbox", "mcp_from_user_config"):
+        out["allowedMcpServers"] = []       # no MCP servers (with --strict-mcp-config, where it can be passed)
+        out["disableClaudeAiConnectors"] = True     # claude.ai connectors not even loaded: blocked ones are
+        # warned about on stderr, and a Remote Control server shows that warning in place of a session's error
+    return out
+
+
+def write_session_settings(cfg):
+    """Write session_settings to policy.settings_inside (only when it changed; the sandbox binds it over the
+    contained config's settings.json). Returns a problem, or None."""
+    path = os.path.join(CLAUDE_CONFIG_DIR, "settings.json")
+    try:
+        with open(path) as fh:
+            settings = session_settings(cfg, json.load(fh))
+    except (OSError, ValueError) as e:
+        return "the contained config's %s cannot be used (%s): fix it with `containedclaude admin`" % (path, e)
+    inside = policy.settings_inside(cfg)
+    os.makedirs(os.path.dirname(inside), exist_ok=True)
+    write_changed(inside, json.dumps(settings, indent=2) + "\n", 0o600)
+    return None
 
 
 def run(project, claude_args, mode="session", out=sys.stderr, command=None):
@@ -848,6 +890,10 @@ def run(project, claude_args, mode="session", out=sys.stderr, command=None):
     rundir = os.path.join(cfg.contained_dir, "run")
     os.makedirs(rundir, exist_ok=True)
     if mode == "session":
+        problem = write_session_settings(cfg)
+        if problem:
+            out.write("containedclaude: cannot start: %s\n" % problem)
+            return 1
         write_envdoc(cfg)
         refresh_stub(cfg, out)
         ensure_import_line(root, out)
@@ -856,12 +902,9 @@ def run(project, claude_args, mode="session", out=sys.stderr, command=None):
         updates.notice(out)             # once a day: installed vs latest Claude Code / Codex
         if not command:                 # a real Claude session (not shell/test): quick doctor if a binary changed
             updates.check_after_change(root, out)
-        if "remote-control" in claude_args:     # the server subcommand (not the --remote-control flag)
-            out.write("containedclaude: note: Claude Code does not pass the launcher's --settings and "
-                      "--strict-mcp-config on to the sessions `claude remote-control` creates: they run without "
-                      "the explanatory hooks and with the contained config's MCP servers (still sandboxed)\n")
-    settings_path = os.path.join(rundir, "settings.json")
-    safe_write(settings_path, json.dumps(claude_settings(cfg), indent=2) + "\n")
+    else:                   # admin: its settings.json is the real one, editable; the launcher's come by flag
+        settings_path = os.path.join(rundir, "settings.json")
+        safe_write(settings_path, json.dumps(claude_settings(cfg), indent=2) + "\n")
     mcp_path = os.path.join(rundir, "mcp.json")
     safe_write(mcp_path, json.dumps({"mcpServers": {}}) + "\n")
 
@@ -889,12 +932,16 @@ def run(project, claude_args, mode="session", out=sys.stderr, command=None):
         cmd += ["--"] + list(command)
     else:
         cmd += ["--", os.path.realpath(claude)]
-        # flags detected from `claude --help` so a Claude Code update that renames one doesn't stop the start
-        if compat.likely("claude", "--settings"):
+        # flags detected from `claude --help` so a Claude Code update that renames one doesn't stop the start.
+        # Project sessions get the launcher's settings from the config's settings.json (write_session_settings)
+        if mode != "session" and compat.likely("claude", "--settings"):
             cmd += ["--settings", settings_path]
-        else:
+        elif mode != "session":
             compat.warn_once("claude lacks --settings: the write hook is not installed (the sandbox still applies)")
-        if not cfg.bool("sandbox", "mcp_from_user_config"):
+        # the server for sessions started from claude.ai: Claude Code refuses to start it behind the MCP flags,
+        # and the sessions it starts get no flags anyway (they have the settings' allowedMcpServers)
+        server = mode == "session" and list(claude_args[:1]) == ["remote-control"]
+        if not server and not cfg.bool("sandbox", "mcp_from_user_config"):
             if compat.likely("claude", "--strict-mcp-config") and compat.likely("claude", "--mcp-config"):
                 # --mcp-config takes several files: the boolean flag after it ends the list, so that a
                 # subcommand following the launcher's flags (`plugin install ...`) is not read as a file name

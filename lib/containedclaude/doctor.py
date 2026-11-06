@@ -180,6 +180,11 @@ def late_automount_check(cfg):
 
 
 def session_probe(cfg, out, real_sbatch=None):
+    from .project import write_session_settings
+    problem = write_session_settings(cfg)       # bound over the config's settings.json, as for a session
+    if problem:
+        out.write("FAIL %s\n" % problem)
+        return False
     sock_dir = tempfile.mkdtemp(prefix="containedclaude-doctor-", dir="/tmp")
 
     scope, scope_env = policy.session_scope(cfg)
