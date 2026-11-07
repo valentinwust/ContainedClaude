@@ -268,11 +268,15 @@ included. They share the server's sandbox and so its scope
 server's own default of 32 sessions would need more processes+threads than session_tasks, and `--spawn
 same-dir`, which also skips Claude Code's question for the mode. Worktree mode is not supported (README): its
 checkouts hold only tracked files, and on the SDS Claude Code's own git checks run without the GIT_CONFIG_*
-variables that carry safe.directory, so git refuses the repository. `--no-create-session-in-dir`: with a
-`bridge-pointer.json` written in the last 4 h (the server rewrites it at every start) Claude Code takes over
-the previous run's first session, and that start fails once the session was archived on claude.ai. Each flag
-is left out when the args give their own or a mode in which Claude Code refuses it (`--continue`/`-c` and
-`--session-id` refuse all three, `--spawn session` refuses `--capacity` and is its one session).
+variables that carry safe.directory, so git refuses the repository. Each flag is left out when the args give
+their own or a mode in which Claude Code refuses it (`--continue`/`-c` and `--session-id` refuse both,
+`--spawn session` refuses `--capacity` and is its one session). Restarts (Claude Code 2.1.319): the server
+creates a session at start and writes `bridge-pointer.json` (per project, in state/claude/projects/<key>/);
+stopped with Ctrl+C it keeps its sessions and environment on claude.ai, and started again within 4 h it reuses
+the environment and re-queues the pointer's first session (archived meanwhile: it makes a new one).
+Its other sessions come back when they are opened or messaged on claude.ai (Ctrl+C stops their work items and
+marks the environment offline, nothing more; checked by hand 2026-11-07). `--no-create-session-in-dir` writes
+no pointer, and Ctrl+C then archives every session and deregisters the environment.
 
 ---------------------------------------------------------------------------------------------------------------
 ## 4. How a job runs
@@ -688,9 +692,10 @@ Connectors off (2026-11-06): a server-style session (`--print --resume=<id>` wit
 which the server showed as the session's failure; with `disableClaudeAiConnectors: true` only the real error.
 Server command (2026-11-06): `test` 32 ok (shell guard 13 cases each, server arguments 13 cases);
 `containedclaude server DIR -- --help` and `cclaude server --help` (outside, and inside a sandbox) print the
-help of `claude remote-control`. By hand: servers started with `--no-create-session-in-dir` open no session
-at start and then serve sessions from claude.ai; a restart within about a minute of stopping is refused
-("already served"), later it works.
+help of `claude remote-control`. A restart within about a minute of stopping is refused ("already served"),
+later it works. Server restarts (2026-11-07, 2.1.319, by hand): server with two sessions, Ctrl+C ("Environment
+preserved"), `cclaude server` again: "Found prior environment", the pointer's session "Adopted ... re-queued"
+and running at once, the other one running as soon as it was opened on claude.ai.
 Occasional manual check of messages (by hand, e.g. after a larger Claude Code update; `test` and `update` stay
 short and don't run it): two throwaway projects P and Q; in tmux `containedclaude P -- --name t-A
 --remote-control`, `containedclaude Q -- --name t-C --remote-control`, `containedclaude P -- --name t-B`. Ask

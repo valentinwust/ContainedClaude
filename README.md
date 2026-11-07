@@ -97,7 +97,9 @@ Caches (pip, conda, Hugging Face, ...) go to `<project>/.cache/`, new conda envi
 ## Remote Control
 `containedclaude DIR -- --remote-control` lets you follow and continue a session from claude.ai or the Claude
 app. `containedclaude server DIR` (or `cclaude server`) runs the Remote Control server: keep it running in
-tmux and start new contained sessions in the project from claude.ai/code or the app. It opens none by itself.
+tmux and start new contained sessions in the project from claude.ai/code or the app. It opens one session at
+start. Stopped with Ctrl+C, it keeps its sessions on claude.ai: started again in that folder within 4 hours,
+it takes back the first one at once and each other one as soon as you open or message it.
 Its sessions share the server's sandbox and limits, so at most 6 run at once (`--capacity N` changes that).
 After you stop a server, claude.ai counts it for about a minute longer and refuses a new one in that folder
 ("already served").

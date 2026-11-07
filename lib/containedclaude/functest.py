@@ -524,16 +524,15 @@ def session_checks(td):
         sys.path.insert(0, os.path.join(CLONE, "lib"))
         from containedclaude.cli import server_args, SERVER_CAPACITY
         cap, same = ["--capacity", str(SERVER_CAPACITY)], ["--spawn", "same-dir"]
-        no = ["--no-create-session-in-dir"]
-        cases = [([], same + cap + no), (["--name", "x"], same + cap + no), (["--spawn", "worktree"], cap + no),
-                 (["--spawn=same-dir"], cap + no), (["--capacity", "2"], same + no), (["--capacity=2"], same + no),
-                 (["--create-session-in-dir"], same + cap), (no, same + cap), (["-c"], []), (["--continue"], []),
+        cases = [([], same + cap), (["--name", "x"], same + cap), (["--spawn", "worktree"], cap),
+                 (["--spawn=same-dir"], cap), (["--capacity", "2"], same), (["--capacity=2"], same),
+                 (["--no-create-session-in-dir"], same + cap), (["-c"], []), (["--continue"], []),
                  (["--session-id", "s"], []), (["--spawn", "session"], []), (["--spawn=session"], [])]
         for args, extra in cases:
             want = ["remote-control"] + extra + args
             assert server_args(args) == want, "%s: %s, not %s" % (args, server_args(args), want)
-        return "%d argument cases (--spawn same-dir, --capacity %d, --no-create-session-in-dir unless given " \
-               "or refused)" % (len(cases), SERVER_CAPACITY)
+        return "%d argument cases (--spawn same-dir, --capacity %d unless given or refused)" % (
+            len(cases), SERVER_CAPACITY)
     check("containedclaude server arguments", server_args)
 
     section("Job system (login node)")

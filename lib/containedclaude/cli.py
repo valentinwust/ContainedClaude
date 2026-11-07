@@ -19,8 +19,8 @@ USAGE = """containedclaude: Claude Code in a sandbox that can only write to one 
                                         the Remote Control server in that sandbox (`claude remote-control`): it
                                         starts contained sessions from claude.ai in the project folder (--spawn
                                         same-dir; worktree mode is not supported), at most %d at once unless
-                                        args give --capacity N (they share the sandbox's limits), and none of
-                                        its own at start (--create-session-in-dir changes that); keep it in tmux
+                                        args give --capacity N (they share the sandbox's limits); a restart
+                                        takes over the last run's first session; keep it in tmux
   containedclaude doctor [DIR] [--jobs] [--gpu] [--image SIF]
                                         verify the sandbox from the inside (interactive; --jobs: also as Slurm jobs)
   containedclaude test [DIR] [--jobs] [--build] [--gpu] [--image SIF] [--keep]
@@ -43,22 +43,17 @@ USAGE %= SERVER_CAPACITY
 
 
 def server_args(args):
-    """`claude remote-control` with args, plus `--spawn same-dir` (worktree mode is not supported: README),
-    `--capacity SERVER_CAPACITY` and `--no-create-session-in-dir` (no session of its own at start: it would take
-    over the previous run's, which fails once that one is archived) unless args give their own or ask for a
-    mode in which Claude Code refuses them (--continue and --session-id refuse all three) or that they don't
-    fit (--spawn session refuses --capacity and is that one session)."""
+    """`claude remote-control` with args, plus `--spawn same-dir` (worktree mode is not supported: README) and
+    `--capacity SERVER_CAPACITY` unless args give their own or ask for a mode in which Claude Code refuses them
+    (--continue and --session-id refuse both, --spawn session refuses --capacity and is that one session)."""
     names = [a.split("=", 1)[0] for a in args]
     spawn = [a.partition("=")[2] or (args[i + 1] if i + 1 < len(args) else "")
              for i, a in enumerate(args) if names[i] == "--spawn"]
     if set(names) & {"-c", "--continue", "--session-id"}:
         return ["remote-control"] + args
     extra = [] if spawn else ["--spawn", "same-dir"]
-    if "session" not in spawn:
-        if "--capacity" not in names:
-            extra += ["--capacity", str(SERVER_CAPACITY)]
-        if not set(names) & {"--create-session-in-dir", "--no-create-session-in-dir"}:
-            extra.append("--no-create-session-in-dir")
+    if "session" not in spawn and "--capacity" not in names:
+        extra += ["--capacity", str(SERVER_CAPACITY)]
     return ["remote-control"] + extra + args
 
 
