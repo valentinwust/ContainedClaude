@@ -8,6 +8,7 @@ Everything happens in a temporary folder <project>/.cc_selftest_<stamp>/ that is
 Output is meant for humans: sections, one line per check (ok / FAIL / skip), timings, and a summary.
 Exit status 0 if nothing failed.
 """
+import glob
 import hashlib
 import json
 import os
@@ -301,7 +302,7 @@ def session_checks(td):
         assert os.path.samefile(os.path.join(cfgdir, "settings.json"), policy.settings_inside(cfg)), \
             "the config's settings.json is not the launcher's copy"
         hooks = json.dumps(st.get("hooks"))
-        missing = [h for h in ("write_guard.py", "peer_guard.py", "oom_notice.py") if h not in hooks]
+        missing = [h for h in ("write_guard.py", "peer_guard.py", "oom_notice.py", "context_notice.py") if h not in hooks]
         assert not missing and hooks.count("peer_guard.py") == 2, "hooks missing: %s" % " ".join(missing)
         assert "RemoteTrigger" in st.get("permissions", {}).get("deny", []), "RemoteTrigger is not denied"
         no_mcp = not cfg.bool("sandbox", "mcp_from_user_config")
@@ -428,6 +429,55 @@ def session_checks(td):
             shutil.rmtree(d, ignore_errors=True)
         return "%d messages in, %d sends out as expected" % (len(prompts), len(sends))
     check("messages only within the project (peer_guard)", peer_guard)
+    def context_notice():
+        # sample transcripts: the session on a model with modelSettings (100k), a subagent with the 200k fallback
+        d = tempfile.mkdtemp(dir="/tmp")
+        sid = "cn-test-%d" % os.getpid()
+        try:
+            def usage(path, tokens, model):
+                with open(path, "a") as fh:
+                    fh.write(json.dumps({"type": "assistant", "message": {"model": model, "usage": {
+                        "input_tokens": 2, "cache_creation_input_tokens": 1000,
+                        "cache_read_input_tokens": tokens - 1002}}}) + "\n")
+                    fh.write(json.dumps({"type": "user", "message": {"content": "x" * 70000}}) + "\n")
+            with open(os.path.join(d, "settings.json"), "w") as fh:
+                json.dump({"modelSettings": {"m-small": {"autoCompactWindow": 100000}}}, fh)
+            main_t = os.path.join(d, sid + ".jsonl")
+            os.makedirs(os.path.join(d, sid, "subagents"))
+            sub_t = os.path.join(d, sid, "subagents", "agent-a1.jsonl")
+            env = dict(os.environ, CLAUDE_CONFIG_DIR=d, CLAUDE_PROJECT_DIR=d)
+            env.pop("CLAUDE_CODE_AUTO_COMPACT_WINDOW", None)
+            hook = os.path.join(CLONE, "sandbox", "hooks", "context_notice.py")
+            def said(agent=None, result=""):
+                payload = {"hook_event_name": "PostToolUse", "tool_name": "Read", "session_id": sid,
+                           "transcript_path": main_t, "cwd": d, "tool_response": result}
+                if agent:
+                    payload.update(agent_id=agent, agent_type="general-purpose")
+                out = subprocess.run([sys.executable, "-I", hook], input=json.dumps(payload), env=env,
+                                     universal_newlines=True, stdout=subprocess.PIPE, timeout=30).stdout
+                return ((json.loads(out) if out.strip() else {}).get("hookSpecificOutput") or {}).get(
+                    "additionalContext", "")
+            # compaction at window - 33k, the notice 25k before: 42k of the 100k window, 142k of the 200k one
+            steps = [(main_t, 40000, "m-small", None, 0, False), (main_t, 43000, "m-small", None, 0, True),
+                     (main_t, 45000, "m-small", None, 0, False),               # once per crossing
+                     (sub_t, 140000, "m-big", "a1", 0, False), (sub_t, 143000, "m-big", "a1", 0, True),
+                     (main_t, 20000, "m-small", None, 0, False),               # after a compaction ...
+                     (main_t, 35000, "m-small", None, 30000, True),            # ... again, with a big result
+                     (sub_t, 400000, "m-big", "a1", 0, False)]                 # past 200k: a 1M window
+            wrong = []
+            for i, (path, tokens, model, agent, result, want) in enumerate(steps):
+                usage(path, tokens, model)
+                got = said(agent, "x" * result)
+                if bool(got) != want or (got and "starts at about %dk" % (67 if model == "m-small" else 167)
+                                         not in got):
+                    wrong.append("step %d: %r" % (i + 1, got[:60] or "silent"))
+            assert not wrong, "; ".join(wrong)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+            for f in glob.glob("/tmp/.containedclaude-context/%s.*" % sid):
+                os.unlink(f)
+        return "warns once 25k before compaction, again after a drop (%d steps)" % len(steps)
+    check("notice close to auto-compaction (context_notice)", context_notice)
     def shell_guard():
         fake = os.path.join(td, "guardbin")
         os.makedirs(fake)

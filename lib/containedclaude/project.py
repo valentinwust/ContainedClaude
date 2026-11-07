@@ -804,7 +804,9 @@ def claude_settings(cfg):
             # and only from the sessions of this project
             "UserPromptSubmit": [{"hooks": cmd("peer_guard.py")}],
             # after a command: tell the agent when a process was killed by the session memory limit
-            "PostToolUse": [{"matcher": "Bash", "hooks": cmd("oom_notice.py")}]},
+            "PostToolUse": [{"matcher": "Bash", "hooks": cmd("oom_notice.py")},
+                            # after any tool, in the session and its subagents: close to auto-compaction
+                            {"matcher": "*", "hooks": cmd("context_notice.py")}]},
         # routines run in the cloud with the account's connectors, outside the sandbox
         "permissions": {"deny": ["RemoteTrigger"]}}
 

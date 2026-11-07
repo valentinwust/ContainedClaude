@@ -80,6 +80,8 @@ sandbox/hooks/oom_notice.py    Claude PostToolUse hook for Bash: tells the agent
                                scope killed a process (reads the scope's memory.events)
 sandbox/hooks/peer_guard.py    Claude UserPromptSubmit + PreToolUse SendMessage hook: messages between sessions
                                only within the project (§5.10)
+sandbox/hooks/context_notice.py  Claude PostToolUse hook for every tool: tells an agent once when it nears
+                               auto-compaction (§5.11)
 templates/                     config.ini, contained_claude.sh (project stub), CLAUDE_environment.md (the
                                sandbox description), CLAUDE_environment_outside.md (the notice on disk)
 site.curry.ini                 committed curry defaults; copied to site.ini by install.sh / init if missing
@@ -184,7 +186,7 @@ memory, history, session records, shell snapshots, Codex rollouts, ...) are boun
 4. write_session_settings: run/user-settings.json (0600) = the contained config's settings.json (a JSON object
    with hooks and permissions in a form Claude Code reads, else the start is refused) plus claude_settings
    (PreToolUse hook -> write_guard.py, PreToolUse SendMessage + UserPromptSubmit -> peer_guard.py, PostToolUse
-   Bash hook -> oom_notice.py, permissions.deny RemoteTrigger) and `allowedMcpServers: []` plus
+   Bash hook -> oom_notice.py, PostToolUse * -> context_notice.py, permissions.deny RemoteTrigger) and `allowedMcpServers: []` plus
    `disableClaudeAiConnectors: true` unless mcp_from_user_config (without the second, every session `claude
    remote-control` starts warns about the blocked connectors on stderr, and the server shows that warning in
    place of the session's real error); the user's own entries stay, written only when it changed. bwrap
@@ -545,6 +547,19 @@ separates contained sessions from the user's others completely. The sessions `cl
 read the same settings.json, so all of this applies there too. Locally they are listed under a derived name
 (`t1-55` in a folder t1); `--name` names only the server's Remote Control entry.
 
+### 5.11 Notice before auto-compaction (sandbox/hooks/context_notice.py)
+A convenience, not containment: after every tool call (main session and subagents, which run the same hooks)
+the hook tells the calling agent once, via additionalContext, when it is within MARGIN (25k) tokens of
+auto-compaction, so it can write down what a summary would lose; what it does is left to the agent. Usage =
+the newest assistant `usage` in the agent's own transcript (subagents: `<session>/subagents/agent-<agent_id>
+.jsonl` next to transcript_path) plus len(tool_response)/3, since Claude Code counts the new result before its
+next request. Compaction starts BUFFER (33k) below the window (`/context`: "Autocompact buffer 33k"). Window:
+CLAUDE_CODE_AUTO_COMPACT_WINDOW, else the subagent definition's autoCompactWindow, else
+modelSettings.<model>.autoCompactWindow (project local, project, contained config), else 200k, or 1M once usage
+is past 200k. Models without a setting may really have 1M (Haiku 5.5 reports 1M): they get the notice early.
+A flag per agent in the session's /tmp keeps it to once until usage drops below the line (a compaction).
+Not covered: Codex, a threshold lowered with CLAUDE_AUTOCOMPACT_PCT_OVERRIDE.
+
 ---------------------------------------------------------------------------------------------------------------
 ## 6. Version dependencies (what can break when tools update) and where to fix
 
@@ -557,6 +572,7 @@ read the same settings.json, so all of this applies there too. Locally they are 
 | Claude Code config folder layout (2.1.318) | projects/<cwd, non-alnum -> '-'>/<session>.jsonl + memory/, history.jsonl appended in place, shell-snapshots/, session-env/<session>/sessionstart-hook-N.sh, file-history/, plans/, ... (the lists in policy.py, taken from the binary's `(Ue(),"name")` joins); .claude.json and .credentials.json replaced by rename | a renamed or new entry is shared between projects until classified: doctor's "shared config folders" section names it (runs after every Claude update); `containedclaude test` checks that every per-project entry is its own mount inside |
 | Codex home layout (0.166.0) | sessions/YYYY/MM/DD/rollout-*.jsonl, archived_sessions/, history.jsonl and session_index.jsonl appended in place, shell_snapshots/<thread>.<ts>.sh, tmp/arg0-linux/codex-arg0*/{apply_patch,applypatch,codex-linux-sandbox}, state_N.sqlite thread index (cwd, rollout_path, title, first_user_message), skills/.system (bundled skills, marker file), app-server-control/ + app-server-daemon/ (background server; off) | same doctor section (patterns *.sqlite); `codex resume` of another project's thread fails (rollout not visible), the picker filters by cwd; a read-only skills/ only means the bundled skills update in `admin codex` |
 | Codex CLI (0.166.0) | its own sandbox = a bwrap + seccomp inner layer; needs /tmp to be a real mount (mount root "/") and, for sockets, `[sandbox_workspace_write] network_access = true` in CODEX_HOME/config.toml (seeded by ensure_state); `[features] daemon_auto_start = false` (seeded: otherwise the TUI copies its binary into packages/ and runs a background server); folder trust `[projects."<path>"] trust_level` (written by codex_trust; Codex can't write config.toml in sessions) | `containedclaude test` runs a command under `codex sandbox` (writes the project, reaches the broker); failure shows there and as "bwrap: Can't mkdir parents ..." or "broker not reachable (Operation not permitted)" in Codex output |
+| Claude Code context and compaction (2.1.319) | context_notice.py: PostToolUse input session_id, transcript_path, agent_id/agent_type (subagents only), tool_response; transcript records type assistant + message.usage (input + cache_creation_input + cache_read_input tokens) and message.model; subagent transcripts in <session>/subagents/agent-<id>.jsonl; autoCompactWindow in modelSettings / agent frontmatter / CLAUDE_CODE_AUTO_COMPACT_WINDOW; a fixed 33k buffer below the window | the notice comes late, early or never; test's check uses sample transcripts and can't see that, the occasional manual check in §8 does. `/context` (`claude -p /context`, no model call) shows the current buffer |
 | util-linux unshare (2.37.4), jobs | --user --map-current-user --mount --propagation private | compat.outer_unshare: falls back to --map-user=UID --map-group=GID (never -r: that maps to root) |
 | apptainer 1.5.5 | exec --userns --containall --workdir --home --pwd --nv --bind --env; build --fakeroot; pull | jobwrap: --userns/--containall/--workdir only if `apptainer exec --help` lists them (compat.likely: if --help is unreadable, pass everything as before); APPTAINER_USERNS=1 forces userns anyway. Security does not depend on these: the surrounding bwrap sandbox decides ro/rw |
 | Claude Code (2.1.319) | CLAUDE_CONFIG_DIR/settings.json read by every Claude process (user settings), also by the sessions `claude remote-control` starts (they inherit env and mounts, not flags; the server refuses to start behind --mcp-config/--strict-mcp-config); `allowedMcpServers: []` there hides every MCP server incl. claude.ai connectors, `disableClaudeAiConnectors: true` keeps the connectors from loading (else each session the server starts warns about them on stderr); the managed-settings folder is fixed at /etc/claude-code (no override in the public build); --settings (admin only), --strict-mcp-config, --mcp-config (not for the server; passed only if `claude --help` lists them, else warns), DISABLE_AUTOUPDATER, hook JSON (tool_name, tool_input.file_path/notebook_path, exit 2 = block + stderr), @import in CLAUDE.md | check `claude --help`; config dir layout names in policy.CLAUDE_CONFIG_RO (missing names are skipped) |
@@ -680,6 +696,13 @@ question); one message to it from an unsandboxed session starts a session that s
 t-B finds that session in ListAgents (under a name derived from P's folder) and can message it, and it
 reports no RemoteTrigger and no mcp__ tools. Afterwards remove the projects' lines from compat.REGISTRY and
 their trust entries from CODEX_HOME/config.toml, then the folders.
+Occasional manual check of the compaction notice (2026-11-07, 2.1.319, Haiku 5.5): a throwaway project; a
+prompt of about 53k tokens (~25k are Claude Code's own) that states a few decisions "not written down yet",
+then asks for a plain `ls`; run `containedclaude shell P -- env CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000 claude
+-p --model claude-haiku-5-5 --permission-mode acceptEdits < prompt`. The transcript shows the notice
+(attachment hook_additional_context) after the `ls`, and the agent wrote the decisions to project memory before
+answering. (A prompt that starts above the line can hit Claude Code's put-off rule and compact later than
+window - 33k.)
 
 ---------------------------------------------------------------------------------------------------------------
 ## 9. How to change common things
@@ -694,6 +717,7 @@ their trust entries from CODEX_HOME/config.toml, then the folders.
 - Shell guard: lib/shell-guard.sh (the subcommand lists at the top); its test is functest's "shell guard".
 - Messages between sessions: sandbox/hooks/peer_guard.py (formats in §6); its test is functest's "messages
   only within the project", plus the occasional manual check of messages in §8.
+- Compaction notice: sandbox/hooks/context_notice.py (BUFFER, MARGIN; formats in §6).
 - Launcher settings for Claude (hooks, denials, MCP rule): project.claude_settings / session_settings; they
   reach sessions through the bound settings.json (§3, 4), admin through --settings; functest's "the
   launcher's settings reach every Claude process" checks them.

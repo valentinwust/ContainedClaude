@@ -153,7 +153,8 @@ for the plugin's reviews) the `cc-*` commands stay blocked by Codex itself.
 triggers when the command is actually run, never because a word appears in a heredoc, a document or a grep
 pattern. A Write/Edit hook compares only the target *path* with the writable areas, to give a clear
 message instead of "read-only file system", and a hook after each command says so when a process was killed by
-the session's memory limit (instead of a bare `Killed`). A hook on messages between sessions keeps them within
+the session's memory limit (instead of a bare `Killed`). Another tells an agent once when it nears
+auto-compaction, so it can write down what a summary would lose. A hook on messages between sessions keeps them within
 the project when Remote Control makes other sessions visible. None of these is a security boundary; the
 sandbox is.
 
