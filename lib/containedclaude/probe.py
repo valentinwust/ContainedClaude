@@ -2,7 +2,8 @@
 
 Every probe is harmless: write probes create a uniquely named empty file and remove it again immediately.
 argv[1]: JSON {"project", "mode", "outside": [dirs writable on the host], "protected": [...], "hidden": [...],
-               "pinned": [folders that must not be renamable], "sockets": [...], "socket": broker socket or null}
+               "hidden_except": {hidden folder: [names bound into it on purpose]}, "pinned": [folders that must
+               not be renamable], "sockets": [...], "socket": broker socket or null}
 """
 import errno
 import fcntl
@@ -37,12 +38,12 @@ def try_modify(p):
         return False, errno.errorcode.get(e.errno, str(e.errno))
 
 
-def visible(p):
+def visible(p, allowed=()):
     if not os.path.lexists(p):
         return False, "absent"
     if os.path.isdir(p):
         try:
-            n = len(os.listdir(p))
+            n = len([e for e in os.listdir(p) if e not in allowed])
         except OSError as e:
             return False, errno.errorcode.get(e.errno, "?")
         return n > 0, "%d entries" % n
@@ -88,7 +89,7 @@ def main():
         except OSError as e:
             add(name, False, False, errno.errorcode.get(e.errno, str(e.errno)))
     for p in a["hidden"]:
-        got, d = visible(p)
+        got, d = visible(p, (a.get("hidden_except") or {}).get(p, ()))
         add("hidden: " + p, False, got, d)
     for s in a["sockets"]:
         try:

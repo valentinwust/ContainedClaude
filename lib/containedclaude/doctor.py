@@ -57,6 +57,9 @@ def probe_args(cfg, mode, sock=None, real_sbatch=None, scope_active=False):
                                                         "~/.codex/auth.json", "~/.local/share/jupyter/runtime"])]
     hidden += ["/run/user/%d" % UID, "/run/munge", os.path.join(STATE, "write_paths.txt")]
     hidden = [h for h in hidden if os.path.lexists(h)]
+    # the session's own writable folders bound into a hidden one (policy.project_store); not the user's data
+    except_ = {h: policy.HOME_CLAUDE_PER_RUNTIME for h in hidden if mode == "session" and
+               os.path.realpath(h) == os.path.realpath(os.path.expanduser("~/.claude"))}
     sockets = [s for s in ["/run/munge/munge.socket.2", "/run/user/%d/bus" % UID, "/run/dbus/system_bus_socket",
                            "/run/user/%d/systemd/private" % UID, os.path.join(HOME, ".gnupg", "S.gpg-agent")]
                + glob.glob("/run/user/%d/cc-socks/*.sock" % UID) if os.path.exists(s)]
@@ -72,7 +75,7 @@ def probe_args(cfg, mode, sock=None, real_sbatch=None, scope_active=False):
     if sock:                        # the broker's socket folder (host /tmp): connect only, no writes
         outside.append(os.path.dirname(sock))
     return {"project": cfg.project, "state": STATE, "mode": mode, "outside": outside, "protected": protected,
-            "pinned": pinned, "hidden": hidden, "sockets": sockets, "socket": sock, "real_sbatch": real_sbatch,
+            "pinned": pinned, "hidden": hidden, "hidden_except": except_, "sockets": sockets, "socket": sock, "real_sbatch": real_sbatch,
             "tmp_max": policy.tmp_size(cfg) if mode == "session" else 0,
             "mem_max": policy.session_mem(cfg) if mode == "session" and scope_active else 0,
             "tasks_max": policy.session_int(cfg, "session_tasks") if mode == "session" and scope_active else 0,
