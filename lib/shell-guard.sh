@@ -5,14 +5,19 @@
 # start contained, `cclaude server` the Remote Control server. It covers this shell only (not IDEs or other
 # programs): the notice in the project's CLAUDE_environment.md stays the safety net.
 
-# subcommands and flags that start no agent here (from `claude --help`, `codex --help`)
-_ccg_claude=" -v --version -h --help agents attach auth auto-mode doctor gateway import install logs mcp "
-_ccg_claude="$_ccg_claude plugin plugins purge rm setup-token stop kill ultrareview update upgrade "
-_ccg_codex=" -V --version -h --help help agents apply a archive cloud completion debug delete doctor "
-_ccg_codex="$_ccg_codex features login logout mcp migrate-nfs-db migrate-rollouts plugin queue sandbox "
-_ccg_codex="$_ccg_codex unarchive update "
+# Helpers are functions without a leading "_" and hold no variables: Claude Code's shell snapshot for its Bash tool
+# keeps only such functions, and claude / codex there must still find what they call.
 
-_cc_guard_root() {      # the project containing the current folder (the launcher's rule: .contained/config.ini)
+ccguard_free() {        # ccguard_free claude|codex: subcommands and flags that start no agent (from `--help`)
+    case "$1" in
+        claude) printf '%s' " -v --version -h --help agents attach auth auto-mode doctor gateway import install logs \
+mcp plugin plugins purge rm setup-token stop kill ultrareview update upgrade ";;
+        *) printf '%s' " -V --version -h --help help agents apply a archive cloud completion debug delete doctor \
+features login logout mcp migrate-nfs-db migrate-rollouts plugin queue sandbox unarchive update ";;
+    esac
+}
+
+ccguard_root() {      # the project containing the current folder (the launcher's rule: .contained/config.ini)
     local d
     d=$(pwd -P) || return 1
     while :; do
@@ -23,7 +28,7 @@ _cc_guard_root() {      # the project containing the current folder (the launche
     done
 }
 
-_cc_contained() {       # _cc_contained claude|codex|server ARGS...: start it in the sandbox of the current folder
+ccguard_contained() {       # ccguard_contained claude|codex|server ARGS...: start it in the sandbox of the current folder
     if ! command -v containedclaude >/dev/null 2>&1; then
         printf 'containedclaude not found on PATH (install.sh links it into ~/.local/bin)\n' >&2
         return 127
@@ -39,14 +44,14 @@ _cc_contained() {       # _cc_contained claude|codex|server ARGS...: start it in
     fi
 }
 
-_cc_guard() {           # _cc_guard claude|codex ARGS...: `claude` / `codex`
+ccguard() {           # ccguard claude|codex ARGS...: `claude` / `codex`
     local tool=$1 root free ans
     shift
-    case "$tool" in claude) free=$_ccg_claude;; *) free=$_ccg_codex;; esac
+    free=$(ccguard_free "$tool")
     if [ $# -gt 0 ]; then
         case "$free" in *" $1 "*) command "$tool" "$@"; return;; esac
     fi
-    if [ "${CONTAINEDCLAUDE:-}" = 1 ] || ! root=$(_cc_guard_root); then
+    if [ "${CONTAINEDCLAUDE:-}" = 1 ] || ! root=$(ccguard_root); then
         command "$tool" "$@"
         return
     fi
@@ -56,27 +61,27 @@ _cc_guard() {           # _cc_guard claude|codex ARGS...: `claude` / `codex`
         read -r ans || { printf '\n' >&2; return 1; }
         case "$ans" in
             u|U) ;;
-            *) _cc_contained "$tool" "$@"; return;;
+            *) ccguard_contained "$tool" "$@"; return;;
         esac
     else
         printf '%s: warning: running uncontained in the ContainedClaude project %s ' "$tool" "$root" >&2
-        printf '(no terminal to ask; cc%s starts it contained)\n' "$tool" >&2
+        printf '(no terminal to ask; c%s starts it contained)\n' "$tool" >&2
     fi
     command "$tool" "$@"
 }
 
-_cc_always() {          # `cclaude` / `ccodex`: contained (inside a sandbox it already is)
-    if [ "${CONTAINEDCLAUDE:-}" = 1 ]; then command "$@"; else _cc_contained "$@"; fi
+ccguard_always() {          # `cclaude` / `ccodex`: contained (inside a sandbox it already is)
+    if [ "${CONTAINEDCLAUDE:-}" = 1 ]; then command "$@"; else ccguard_contained "$@"; fi
 }
 
-function claude { _cc_guard claude "$@"; }
-function codex { _cc_guard codex "$@"; }
+function claude { ccguard claude "$@"; }
+function codex { ccguard codex "$@"; }
 function cclaude {     # `cclaude server [args]`: the Remote Control server (`containedclaude server`)
-    if [ "${1:-}" != server ]; then _cc_always claude "$@"; return; fi
+    if [ "${1:-}" != server ]; then ccguard_always claude "$@"; return; fi
     shift
-    if [ "${CONTAINEDCLAUDE:-}" = 1 ]; then command claude remote-control "$@"; else _cc_contained server "$@"; fi
+    if [ "${CONTAINEDCLAUDE:-}" = 1 ]; then command claude remote-control "$@"; else ccguard_contained server "$@"; fi
 }
-function ccodex { _cc_always codex "$@"; }
+function ccodex { ccguard_always codex "$@"; }
 
 for _cc_t in claude codex; do
     alias "$_cc_t" >/dev/null 2>&1 &&
