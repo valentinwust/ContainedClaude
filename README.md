@@ -131,6 +131,14 @@ paths, shares to mount, hidden and protected paths, session limits, job defaults
 options. It overrides `site.ini`, which overrides the built-in defaults. Changes apply to the next session or
 job.
 
+**Model, effort, auto-compaction.** These live in the contained config, which applies to all contained projects
+(your own `~/.claude` and `~/.codex` only apply outside). Claude: `modelSettings` (per model `autoCompactWindow`,
+`effortLevel`) and `effortLevel` in `~/.local/share/containedclaude/claude-config/settings.json`; each project
+copies it when its sandbox starts, so a running server keeps the old values until restarted. Codex: `model`,
+`model_reasoning_effort` and `model_auto_compact_token_limit` above the first `[section]` of
+`~/.local/share/containedclaude/codex-home/config.toml`; new Codex sessions use them at once. Edit the files
+directly or with `containedclaude admin` / `admin codex`.
+
 ## Check and update
 ```bash
 containedclaude test ~/projects/myanalysis     # what should work (seconds); --jobs, --gpu, --build, --image add more
