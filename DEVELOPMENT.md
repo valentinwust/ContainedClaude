@@ -463,6 +463,11 @@ noticed after the automatic doctor run that follows a Claude/Codex update):
   daemon; Codex: shell_snapshots, tmp, .tmp, app-server-control, app-server-daemon): alive for a session and sourced, executed or connected to (the
   shell snapshot and the SessionStart hook env file go into every Bash command; Codex puts helper binaries
   like apply_patch into tmp/arg0-linux/ and runs them), in the project's runtime folder (tmpfs, §3 step 6);
+  likewise ~/.claude/bridge-spawn (HOME_CLAUDE_PER_RUNTIME), which Claude Code takes from the home folder, not
+  CLAUDE_CONFIG_DIR: a Remote Control server writes each spawned session's --settings/--mcp-config/prompt
+  files there (claude.ai's server config). Bound into the hidden ~/.claude in sessions only; without it the
+  server logs "[bridge:server-config] not applied ... EROFS" and drops them. MCP stays off either way
+  (allowedMcpServers: [] in the session's settings.json hides every MCP server, §5.7);
 - shared and writable (CLAUDE_CONFIG_SHARED, CODEX_HOME_SHARED + *.sqlite): root files Claude replaces by
   rename (.claude.json, .credentials.json, ...: a file bind would break them), caches, diagnostics; Codex's
   login, its memory and thread index (state_*.sqlite lists every project's threads by cwd, title and first

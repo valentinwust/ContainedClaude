@@ -288,8 +288,13 @@ def session_checks(td):
             mounted = {l.split()[4] for l in fh}
         names = policy.CLAUDE_CONFIG_PER_PROJECT + policy.CLAUDE_CONFIG_PER_PROJECT_FILES + policy.CLAUDE_CONFIG_PER_RUNTIME
         missing = [n for n in names if os.path.join(cfgdir, n) not in mounted]
+        home_claude = os.path.realpath(os.path.expanduser("~/.claude"))
+        if os.path.isdir(home_claude):       # hidden; Remote Control writes its spawn files there anyway
+            missing += [n for n in policy.HOME_CLAUDE_PER_RUNTIME if os.path.join(home_claude, n) not in mounted
+                        or not os.access(os.path.join(home_claude, n), os.W_OK)]
         assert not missing, "shared, not per project: %s" % " ".join(missing)
-        return "%d entries (incl. sessions, shell snapshots, hook env files) are own mounts" % len(names)
+        return "%d entries (incl. sessions, shell snapshots, hook env files) are own mounts" % (
+            len(names) + len(policy.HOME_CLAUDE_PER_RUNTIME))
     check("per-project entries of the shared config are own mounts", own_mounts if cfgdir else lambda: False)
     def launcher_settings():
         # every Claude process here reads them from the config's settings.json (also the sessions `claude

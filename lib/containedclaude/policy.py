@@ -62,6 +62,9 @@ CLAUDE_CONFIG_PER_PROJECT_FILES = ["history.jsonl"]    # appended in place (veri
 #   files go into every Bash command; session records, teams, tasks, daemon socket): per project, in the
 #   project's runtime folder (tmpfs, project_runtime),
 CLAUDE_CONFIG_PER_RUNTIME = ["sessions", "shell-snapshots", "session-env", "teams", "tasks", "daemon"]
+# ... and below ~/.claude (hidden), which Claude Code uses for these whatever CLAUDE_CONFIG_DIR says: the
+# --settings/--mcp-config/prompt files a Remote Control server writes for each session it starts
+HOME_CLAUDE_PER_RUNTIME = ["bridge-spawn"]
 # - shared and writable: root files Claude replaces by rename (a file bind would break them; .claude.json holds
 #   the account, onboarding and per-project trust/allowed tools; the login), caches and diagnostics.
 CLAUDE_CONFIG_SHARED = [".claude.json", ".credentials.json", ".config.json", ".last-cleanup", ".update.lock",
@@ -401,6 +404,13 @@ def project_store(cfg, runtime, mode="session"):
             os.makedirs(os.path.dirname(src), 0o700, exist_ok=True)
             os.close(os.open(src, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600))
             out.append((src, os.path.join(target, name)))
+    home_claude = os.path.realpath(os.path.expanduser("~/.claude"))
+    if mode == "session" and os.path.isdir(home_claude) and \
+            home_claude in {os.path.realpath(p) for p in cfg.hide_paths()}:     # an empty tmpfs inside
+        for name in HOME_CLAUDE_PER_RUNTIME:
+            src = os.path.join(runtime, "home-claude", name)
+            os.makedirs(src, 0o700, exist_ok=True)
+            out.append((src, os.path.join(home_claude, name)))
     return out
 
 
