@@ -444,7 +444,11 @@ def session_checks(td):
                     fh.write(json.dumps({"type": "assistant", "message": {"model": model, "usage": {
                         "input_tokens": 2, "cache_creation_input_tokens": 1000,
                         "cache_read_input_tokens": tokens - 1002}}}) + "\n")
-                    fh.write(json.dumps({"type": "user", "message": {"content": "x" * 70000}}) + "\n")
+                    fh.write(json.dumps({"type": "system", "content": "x" * 70000}) + "\n")     # not counted
+            def write_result(path, chars, tool_id):  # a parallel call's result, written before this hook runs
+                with open(path, "a") as fh:
+                    fh.write(json.dumps({"type": "user", "message": {"content": [
+                        {"type": "tool_result", "tool_use_id": tool_id, "content": "y" * chars}]}}) + "\n")
             with open(os.path.join(d, "settings.json"), "w") as fh:
                 json.dump({"modelSettings": {"m-small": {"autoCompactWindow": 100000}}}, fh)
             main_t = os.path.join(d, sid + ".jsonl")
@@ -453,9 +457,9 @@ def session_checks(td):
             env = dict(os.environ, CLAUDE_CONFIG_DIR=d, CLAUDE_PROJECT_DIR=d)
             env.pop("CLAUDE_CODE_AUTO_COMPACT_WINDOW", None)
             hook = os.path.join(CLONE, "sandbox", "hooks", "context_notice.py")
-            def said(agent=None, result=""):
+            def said(agent=None, result="", tool_id="t-own"):
                 payload = {"hook_event_name": "PostToolUse", "tool_name": "Read", "session_id": sid,
-                           "transcript_path": main_t, "cwd": d, "tool_response": result}
+                           "transcript_path": main_t, "cwd": d, "tool_response": result, "tool_use_id": tool_id}
                 if agent:
                     payload.update(agent_id=agent, agent_type="general-purpose")
                 out = subprocess.run([sys.executable, "-I", hook], input=json.dumps(payload), env=env,
@@ -468,11 +472,21 @@ def session_checks(td):
                      (sub_t, 140000, "m-big", "a1", 0, False), (sub_t, 143000, "m-big", "a1", 0, True),
                      (main_t, 20000, "m-small", None, 0, False),               # after a compaction ...
                      (main_t, 35000, "m-small", None, 30000, True),            # ... again, with a big result
-                     (sub_t, 400000, "m-big", "a1", 0, False)]                 # past 200k: a 1M window
+                     (sub_t, 400000, "m-big", "a1", 0, False),                 # past 200k: a 1M window
+                     (main_t, 10000, "m-small", None, 0, False),               # after another compaction:
+                     (main_t, 20000, "m-small", None, (2, 30000), True),       # 2 parallel results + this one
+                     (main_t, 10000, "m-small", None, 0, False),
+                     (main_t, 20000, "m-small", None, (1, 40000), False)]      # this one, already written
             wrong = []
             for i, (path, tokens, model, agent, result, want) in enumerate(steps):
                 usage(path, tokens, model)
-                got = said(agent, "x" * result)
+                if isinstance(result, tuple):        # (n, chars): n results written (n == 1: this call's)
+                    n, chars = result
+                    for k in range(n):
+                        write_result(path, chars, "t-par-%d-%d" % (i, k))
+                    got = said(agent, "x" * chars, "t-par-%d-0" % i if n == 1 else "t-own")
+                else:
+                    got = said(agent, "x" * result)
                 if bool(got) != want or (got and "starts at about %dk" % (67 if model == "m-small" else 167)
                                          not in got):
                     wrong.append("step %d: %r" % (i + 1, got[:60] or "silent"))

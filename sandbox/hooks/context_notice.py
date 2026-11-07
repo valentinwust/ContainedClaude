@@ -4,8 +4,8 @@ session or a subagent) is within MARGIN tokens of auto-compaction, tell it once 
 write down what a summary would lose. Silent again until its usage drops below that, e.g. after a compaction.
 
 Context used = the newest assistant record's usage in the agent's own transcript (input + cache creation + cache
-read tokens, what Claude Code counts) plus a rough estimate of this tool's result, which Claude Code counts before
-its next request. Compaction starts BUFFER tokens below the window (/context: "Autocompact buffer 33k"). The
+read tokens, what Claude Code counts) plus a rough estimate (characters / 3) of what came in after it and goes
+into the next request: tool results of parallel calls and attachments already written, and this tool's result. Compaction starts BUFFER tokens below the window (/context: "Autocompact buffer 33k"). The
 window, first match wins: CLAUDE_CODE_AUTO_COMPACT_WINDOW, the
 subagent definition's autoCompactWindow, modelSettings.<model>.autoCompactWindow in the settings files (local >
 project > user), else 200k (Claude Code's own fallback), or 1M once usage is past 200k.
@@ -22,12 +22,30 @@ TAIL = 65536
 STATE = "/tmp/.containedclaude-context"       # /tmp is private to the session
 
 
+def added_chars(rec):
+    """Characters of a transcript record that the next request carries: user messages and tool results (not
+    the toolUseResult copy) and attachments (hook output, files). Metadata records count nothing."""
+    if rec.get("type") == "user":
+        return len(json.dumps((rec.get("message") or {}).get("content") or ""))
+    if rec.get("type") == "attachment":
+        return len(json.dumps(rec.get("attachment") or ""))
+    return 0
+
+
+def tool_ids(rec):
+    content = (rec.get("message") or {}).get("content") if rec.get("type") == "user" else None
+    return {c.get("tool_use_id") for c in content if isinstance(c, dict)} if isinstance(content, list) else set()
+
+
 def newest_usage(path):
-    """(tokens, model) of the newest assistant record with usage, reading the file backwards in chunks."""
+    """(tokens, model, chars after, tool ids after): the newest assistant record with usage, and what the
+    records written after it add (added_chars) and which tool results are among them. Reads the file backwards
+    in chunks."""
     try:
         fh = open(path, "rb")
     except OSError:
         return None
+    after, ids = 0, set()
     with fh:
         end = fh.seek(0, 2)
         rest = b""
@@ -37,17 +55,27 @@ def newest_usage(path):
             lines = (fh.read(end - start) + rest).split(b"\n")
             rest = lines.pop(0) if start else b""          # maybe cut; completed by the next chunk
             for line in reversed(lines):
-                if b'"usage"' not in line or b'"assistant"' not in line:
+                if not line.strip():
                     continue
                 try:
-                    msg = json.loads(line).get("message") or {}
-                    u = msg["usage"]
-                    tokens = (u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
-                              + u.get("cache_read_input_tokens", 0))
-                except (ValueError, KeyError, TypeError, AttributeError):
+                    rec = json.loads(line)
+                except ValueError:
                     continue
-                if tokens > 0:                               # synthetic messages carry zero usage
-                    return tokens, msg.get("model") or ""
+                if not isinstance(rec, dict):
+                    continue
+                msg = rec.get("message") if isinstance(rec.get("message"), dict) else {}
+                u = msg.get("usage") if rec.get("type") == "assistant" else None
+                if isinstance(u, dict):
+                    try:
+                        tokens = (u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
+                                  + u.get("cache_read_input_tokens", 0))
+                    except TypeError:
+                        tokens = 0
+                    if tokens > 0:                           # synthetic messages carry zero usage
+                        return tokens, msg.get("model") or "", after, ids
+                    continue
+                after += added_chars(rec)
+                ids |= tool_ids(rec)
             end = start
     return None
 
@@ -123,8 +151,10 @@ def main():
     found = newest_usage(transcript)
     if not found:
         return 0
-    tokens, model = found
-    tokens += len(json.dumps(data.get("tool_response"))) // 3
+    tokens, model, after, ids = found
+    if not data.get("tool_use_id") or data.get("tool_use_id") not in ids:     # this result, unless written
+        after += len(json.dumps(data.get("tool_response")))
+    tokens += after // 3
     project = os.environ.get("CLAUDE_PROJECT_DIR") or data.get("cwd") or os.getcwd()
     w = window(model, tokens, data.get("agent_type") if agent else None, project)
     flag = os.path.join(STATE, "".join(c if c.isalnum() or c in "-_" else "_" for c in session + "." + (agent or "main")))
