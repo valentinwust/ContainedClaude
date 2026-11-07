@@ -79,7 +79,7 @@ sandbox/hooks/write_guard.py   Claude PreToolUse hook for Write/Edit/...: path-b
 sandbox/hooks/oom_notice.py    Claude PostToolUse hook for Bash: tells the agent when the session's memory
                                scope killed a process (reads the scope's memory.events)
 sandbox/hooks/peer_guard.py    Claude UserPromptSubmit + PreToolUse SendMessage hook: messages between sessions
-                               only within the project (§5.10)
+                               only within the project; PostToolUse ListAgents: which are reachable (§5.10)
 sandbox/hooks/context_notice.py  Claude PostToolUse hook for every tool: tells an agent once when it nears
                                auto-compaction (§5.11)
 lib/containedclaude/host_extras.py  add|remove|status: the extras (install.sh --extras) in the user's own
@@ -189,7 +189,7 @@ memory, history, session records, shell snapshots, Codex rollouts, ...) are boun
    missing; skipped if config.toml has an inline `projects =` table.
 4. write_session_settings: run/user-settings.json (0600) = the contained config's settings.json (a JSON object
    with hooks and permissions in a form Claude Code reads, else the start is refused) plus claude_settings
-   (PreToolUse hook -> write_guard.py, PreToolUse SendMessage + UserPromptSubmit -> peer_guard.py, PostToolUse
+   (PreToolUse hook -> write_guard.py, PreToolUse SendMessage + UserPromptSubmit + PostToolUse ListAgents -> peer_guard.py, PostToolUse
    Bash hook -> oom_notice.py, PostToolUse * -> context_notice.py, permissions.deny RemoteTrigger) and `allowedMcpServers: []` plus
    `disableClaudeAiConnectors: true` unless mcp_from_user_config (without the second, every session `claude
    remote-control` starts warns about the blocked connectors on stderr, and the server shows that warning in
@@ -553,6 +553,8 @@ peer_guard.py (in the session's settings.json, §3, 4) keeps messages within the
   session's agents (Agent/Task calls' input.name and agentId in the transcript) and teammates
   (teams/*/config.json members). Anything else is denied with a text that says what to do. A name shared by a
   local and a remote session is refused by Claude Code itself ("2 agents are named ..."); the ref decides then.
+- PostToolUse ListAgents: additionalContext names this project's running sessions and says the other rows
+  are refused (a hook can't filter a built-in tool's output, so the Remote Control rows stay listed).
 - permissions.deny RemoteTrigger: the tool is gone from the session (routines run in the cloud with the
   account's connectors).
 Like the other hooks this is not a boundary (§1); a separate claude.ai account for the contained config

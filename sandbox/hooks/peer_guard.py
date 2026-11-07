@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Hook for messages between Claude sessions in a ContainedClaude session (UserPromptSubmit, PreToolUse
-SendMessage): contained sessions exchange messages only with the sessions of their own project, and with
+SendMessage, PostToolUse ListAgents): contained sessions exchange messages only with the sessions of their own project, and with
 their own agents and teammates.
 
 - UserPromptSubmit: a message another session sent (`<cross-session-message from="...">`) is not delivered
@@ -8,6 +8,8 @@ their own agents and teammates.
 - PreToolUse SendMessage: `main`, this session's agents and teammates and the sessions of this project are
   allowed; any other recipient (a session over Remote Control, in the cloud, of another project) is refused
   with an explanation.
+- PostToolUse ListAgents: a note says which of the listed sessions can be reached, since the list also shows
+  the account's Remote Control sessions (a hook cannot change what a built-in tool returns).
 
 The sessions of this project are the records in $CLAUDE_CONFIG_DIR/sessions (a folder per project) whose
 socket answers. Only recipients and message headers are looked at, never the message text. Formats follow
@@ -175,6 +177,15 @@ def outbound(data):
         % to)}}
 
 
+def listing(data):
+    names = sorted(project_sessions()[0])
+    return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": (
+        "ContainedClaude: from this sandbox, SendMessage reaches only main, this session's agents and teammates, "
+        "and the running sessions of this project (%s). Any other session in this list (over Remote Control, in "
+        "the cloud, of another project) is refused; to reach one, ask the user to pass the message on."
+        % (", ".join(names) or "none"))}}
+
+
 def main():
     try:
         data = json.load(sys.stdin)
@@ -187,6 +198,8 @@ def main():
         out = inbound(data)
     elif event == "PreToolUse" and data.get("tool_name") == "SendMessage":
         out = outbound(data)
+    elif event == "PostToolUse" and data.get("tool_name") == "ListAgents":
+        out = listing(data)
     else:
         out = None
     if out:

@@ -308,7 +308,7 @@ def session_checks(td):
             "the config's settings.json is not the launcher's copy"
         hooks = json.dumps(st.get("hooks"))
         missing = [h for h in ("write_guard.py", "peer_guard.py", "oom_notice.py", "context_notice.py") if h not in hooks]
-        assert not missing and hooks.count("peer_guard.py") == 2, "hooks missing: %s" % " ".join(missing)
+        assert not missing and hooks.count("peer_guard.py") == 3, "hooks missing: %s" % " ".join(missing)
         assert "RemoteTrigger" in st.get("permissions", {}).get("deny", []), "RemoteTrigger is not denied"
         no_mcp = not cfg.bool("sandbox", "mcp_from_user_config")
         assert (st.get("allowedMcpServers") == []) == no_mcp, "allowedMcpServers: %r" % st.get("allowedMcpServers")
@@ -393,7 +393,7 @@ def session_checks(td):
         try:
             sock, gone = os.path.join(d, "1.sock"), os.path.join(d, "2.sock")
             srv.bind(sock)
-            srv.listen(4)
+            srv.listen(64)                   # never accepted: each liveness check takes one place
             os.makedirs(os.path.join(d, "sessions"))
             for n, name, path in (("1", "proj-peer", sock), ("2", "gone-peer", gone)):
                 with open(os.path.join(d, "sessions", n + ".json"), "w") as fh:
@@ -428,11 +428,17 @@ def session_checks(td):
                                            "transcript_path": transcript,
                                            "tool_input": {"to": to, "recipient_kind": kind, "message": "hi"}})]
                       if got != want]
+            note = subprocess.run([sys.executable, "-I", guard], env=env, universal_newlines=True,
+                                  input=json.dumps({"hook_event_name": "PostToolUse", "tool_name": "ListAgents",
+                                                    "tool_response": "..."}), stdout=subprocess.PIPE, timeout=30).stdout
+            ctx = ((json.loads(note) if note.strip() else {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
+            if "(proj-peer)" not in ctx:
+                wrong.append("ListAgents note: %r" % (ctx[:80] or "none"))
             assert not wrong, "; ".join(wrong)
         finally:
             srv.close()
             shutil.rmtree(d, ignore_errors=True)
-        return "%d messages in, %d sends out as expected" % (len(prompts), len(sends))
+        return "%d messages in, %d sends out as expected, ListAgents note" % (len(prompts), len(sends))
     check("messages only within the project (peer_guard)", peer_guard)
     def context_notice():
         # sample transcripts: the session on a model with modelSettings (100k), a subagent with the 200k fallback
