@@ -493,10 +493,39 @@ def session_checks(td):
             assert not wrong, "; ".join(wrong)
         finally:
             shutil.rmtree(d, ignore_errors=True)
-            for f in glob.glob("/tmp/.containedclaude-context/%s.*" % sid):
+            for f in glob.glob("/tmp/.containedclaude-context-%d/%s.*" % (os.getuid(), sid)):
                 os.unlink(f)
         return "warns once 25k before compaction, again after a drop (%d steps)" % len(steps)
     check("notice close to auto-compaction (context_notice)", context_notice)
+    def host_extras():
+        # install.sh --extras on a sample settings.json: added once (an older clone's entry replaced), the user's
+        # own entries kept, remove restores the file
+        d = tempfile.mkdtemp(dir="/tmp")
+        try:
+            f = os.path.join(d, "settings.json")
+            mine = {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo mine"}]}
+            old = {"matcher": "*", "hooks": [{"type": "command",
+                                              "command": "/usr/bin/python3 -I /old/sandbox/hooks/context_notice.py"}]}
+            with open(f, "w") as fh:
+                json.dump({"model": "x", "hooks": {"PostToolUse": [mine, old]}}, fh)
+            def read_json(p):
+                with open(p) as fh:
+                    return json.load(fh)
+            env = dict(os.environ, CLAUDE_CONFIG_DIR=d)
+            tool =os.path.join(CLONE, "lib", "containedclaude", "host_extras.py")
+            def run(cmd):
+                return subprocess.run(["/usr/bin/python3", "-I", tool, cmd], env=env, stdout=subprocess.PIPE,
+                                      stderr=subprocess.STDOUT, universal_newlines=True, timeout=30).returncode
+            assert run("add") == 0 and run("add") == 0 and run("status") == 0, "add failed"
+            post = read_json(f)["hooks"]["PostToolUse"]
+            ours = [e for e in post if "context_notice.py" in json.dumps(e)]
+            assert post[0] == mine and len(ours) == 1 and CLONE in json.dumps(ours[0]), "after add: %r" % post
+            assert run("remove") == 0 and run("status") == 1, "remove failed"
+            assert read_json(f) == {"model": "x", "hooks": {"PostToolUse": [mine]}}, "after remove: %r" % read_json(f)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        return "added once, own entries kept, removed again"
+    check("extras in the user's own settings (install.sh --extras)", host_extras)
     def shell_guard():
         fake = os.path.join(td, "guardbin")
         os.makedirs(fake)

@@ -13,13 +13,30 @@ project > user), else 200k (Claude Code's own fallback), or 1M once usage is pas
 import glob
 import json
 import os
+import stat
 import sys
 
 BUFFER = 33000                                 # Claude Code compacts this far below the window
 MARGIN = 25000                                 # warn this far before that: room to write notes
 DEFAULT_WINDOW, LONG_WINDOW = 200000, 1000000
 TAIL = 65536
-STATE = "/tmp/.containedclaude-context"       # /tmp is private to the session
+STATE = "/tmp/.containedclaude-context-%d" % os.getuid()     # private /tmp in the sandbox, shared outside
+
+
+def state_dir():
+    """STATE, made if missing and used only if it is our own real folder (outside the sandbox /tmp is shared
+    with other users); else None (then the hook stays silent rather than repeat the notice)."""
+    try:
+        os.mkdir(STATE, 0o700)
+    except FileExistsError:
+        pass
+    except OSError:
+        return None
+    try:
+        st = os.lstat(STATE)
+    except OSError:
+        return None
+    return STATE if stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and not st.st_mode & 0o077 else None
 
 
 def added_chars(rec):
@@ -157,7 +174,10 @@ def main():
     tokens += after // 3
     project = os.environ.get("CLAUDE_PROJECT_DIR") or data.get("cwd") or os.getcwd()
     w = window(model, tokens, data.get("agent_type") if agent else None, project)
-    flag = os.path.join(STATE, "".join(c if c.isalnum() or c in "-_" else "_" for c in session + "." + (agent or "main")))
+    d = state_dir()
+    if d is None:
+        return 0
+    flag = os.path.join(d, "".join(c if c.isalnum() or c in "-_" else "_" for c in session + "." + (agent or "main")))
     trigger = w - BUFFER
     if tokens < trigger - MARGIN:
         if os.path.exists(flag):
@@ -169,10 +189,9 @@ def main():
     if os.path.exists(flag):
         return 0
     try:
-        os.makedirs(STATE, exist_ok=True)
-        open(flag, "w").close()
+        os.close(os.open(flag, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600))
     except OSError:
-        pass
+        return 0                                     # without the flag it would repeat at every call
     msg = ("containedclaude: your context holds about %dk tokens and auto-compaction starts at about %dk, so it "
            "will summarize this conversation soon and details that live only in the conversation may be lost. "
            "Consider writing down what matters (state, decisions, paths, open work) where you or the user will find "

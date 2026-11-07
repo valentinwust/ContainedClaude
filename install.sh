@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # Install the `containedclaude` command (a symlink into ~/.local/bin) and create site.ini if missing.
-#   ./install.sh [--shell-guard] [SITE_TEMPLATE]   default template: site.curry.ini (site.example.ini elsewhere)
+#   ./install.sh [--shell-guard] [--extras] [SITE_TEMPLATE]   default template: site.curry.ini (site.example.ini elsewhere)
 #   --shell-guard: one line in ~/.bashrc (or ~/.zshrc) that loads lib/shell-guard.sh: `claude` / `codex` in a
 #                  ContainedClaude project ask whether to start contained; adds `cclaude` / `ccodex`
+#   --extras:      quality-of-life features for Claude Code outside the sandbox too, in your own settings.json
+#                  (for now the notice before auto-compaction); added once, run from this clone
 set -euo pipefail
 here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-guard=0 template=site.curry.ini
+guard=0 extras=0 template=site.curry.ini
 for a in "$@"; do
   case "$a" in
     --shell-guard) guard=1;;
-    -h|--help) sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
-    -*) echo "usage: $0 [--shell-guard] [SITE_TEMPLATE]" >&2; exit 2;;
+    --extras) extras=1;;
+    -h|--help) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    -*) echo "usage: $0 [--shell-guard] [--extras] [SITE_TEMPLATE]" >&2; exit 2;;
     *) template="$a";;
   esac
 done
@@ -48,4 +51,9 @@ if (( guard )); then
   fi
 elif [[ -n "$rc" ]] && ! grep -qF -- "$mark" "$rc" 2>/dev/null; then
   echo "optional: $here/install.sh --shell-guard adds cclaude / ccodex and makes claude / codex ask first in a project"
+fi
+if (( extras )); then
+  /usr/bin/python3 -I "$here/lib/containedclaude/host_extras.py" add
+elif ! /usr/bin/python3 -I "$here/lib/containedclaude/host_extras.py" status >/dev/null 2>&1; then
+  echo "optional: $here/install.sh --extras adds the notice before auto-compaction to Claude Code outside the sandbox too"
 fi

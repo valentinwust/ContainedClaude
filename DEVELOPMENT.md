@@ -82,17 +82,21 @@ sandbox/hooks/peer_guard.py    Claude UserPromptSubmit + PreToolUse SendMessage 
                                only within the project (§5.10)
 sandbox/hooks/context_notice.py  Claude PostToolUse hook for every tool: tells an agent once when it nears
                                auto-compaction (§5.11)
+lib/containedclaude/host_extras.py  add|remove|status: the extras (install.sh --extras) in the user's own
+                               settings.json ($CLAUDE_CONFIG_DIR or ~/.claude): hooks from sandbox/hooks run
+                               from this clone; recognised by script name, so added once, other entries kept
 templates/                     config.ini, contained_claude.sh (project stub), CLAUDE_environment.md (the
                                sandbox description), CLAUDE_environment_outside.md (the notice on disk)
 site.curry.ini                 committed curry defaults; copied to site.ini by install.sh / init if missing
 site.example.ini / site.ini    generic template / the active local copy (gitignored)
-install.sh [--shell-guard] [TEMPLATE]
+install.sh [--shell-guard] [--extras] [TEMPLATE]
                                symlink bin/containedclaude into ~/.local/bin, create site.ini (default from
                                site.curry.ini); --shell-guard: one marked line in the rc file of $SHELL (bash,
                                zsh) that sources lib/shell-guard.sh (replaces an older one, keeps a symlinked rc;
-                               without the flag, one line on how to add it while that line is missing)
-uninstall.sh [--state]         remove that symlink (only if it points into this clone) and the marked shell guard
-                               line from ~/.bashrc / ~/.zshrc; --state: also the known
+                               without the flag, one line on how to add it while that line is missing);
+                               --extras: host_extras.py add (same hint while missing)
+uninstall.sh [--state]         remove that symlink (only if it points into this clone), the marked shell guard
+                               line from ~/.bashrc / ~/.zshrc and the extras; --state: also the known
                                entries of STATE (claude-config, codex-home, registry, caches; other files and
                                the folder stay), refused while sessions run. Clone and projects untouched.
 LICENSE                        MIT
@@ -568,7 +572,9 @@ a live check with three parallel base64 results of 28k characters warned one cal
 CLAUDE_CODE_AUTO_COMPACT_WINDOW, else the subagent definition's autoCompactWindow, else
 modelSettings.<model>.autoCompactWindow (project local, project, contained config), else 200k, or 1M once usage
 is past 200k. Models without a setting may really have 1M (Haiku 5.5 reports 1M): they get the notice early.
-A flag per agent in the session's /tmp keeps it to once until usage drops below the line (a compaction).
+A flag per agent in /tmp/.containedclaude-context-<uid> keeps it to once until usage drops below the line (a
+compaction); the hook uses that folder only if it is a real folder of its own with mode 700, since outside the
+sandbox (install.sh --extras, the same script in ~/.claude/settings.json) /tmp is shared.
 Not covered: Codex, a threshold lowered with CLAUDE_AUTOCOMPACT_PCT_OVERRIDE.
 
 ---------------------------------------------------------------------------------------------------------------

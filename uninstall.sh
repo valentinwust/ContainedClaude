@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Undo install.sh: remove the `containedclaude` link from ~/.local/bin (only if it points into this clone) and
-# the shell guard line from ~/.bashrc / ~/.zshrc (install.sh --shell-guard).
+# Undo install.sh: remove the `containedclaude` link from ~/.local/bin (only if it points into this clone), the
+# shell guard line from ~/.bashrc / ~/.zshrc (install.sh --shell-guard) and the extras from your own Claude
+# settings.json (install.sh --extras).
 #   ./uninstall.sh            the link and that line only; says what else exists and how to remove it
 #   ./uninstall.sh --state    also the host-side state in ~/.local/share/containedclaude: the contained Claude
 #                             config (login, plugins, settings), the Codex login, the project
@@ -17,7 +18,7 @@ with_state=0
 for a in "$@"; do
   case "$a" in
     --state) with_state=1;;
-    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "usage: $0 [--state]" >&2; exit 2;;
   esac
 done
@@ -43,6 +44,11 @@ for rc in "$HOME/.bashrc" "${ZDOTDIR:-$HOME}/.zshrc"; do
   rest="$( { grep -vF -- "$mark" "$rc" || true; } )"
   printf '%s\n' "$rest" > "$rc"; echo "removed the shell guard line from $rc"
 done
+
+# 1c. the extras (install.sh --extras) in the user's own Claude settings.json
+if /usr/bin/python3 -I "$here/lib/containedclaude/host_extras.py" status >/dev/null 2>&1; then
+  /usr/bin/python3 -I "$here/lib/containedclaude/host_extras.py" remove
+fi
 
 # 2. projects: listed for information only (from the registry, before it is removed)
 projects=()

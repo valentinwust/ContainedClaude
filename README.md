@@ -49,6 +49,10 @@ as usual. Elsewhere nothing changes, and `command claude` skips the question. `c
 Claude or Codex contained in the current folder's project and pass their arguments on; `cclaude server` starts
 the Remote Control server. Everything else (`init`, `shell`, `test`, ...) stays `containedclaude`.
 
+**Extras (optional).** `~/ContainedClaude/install.sh --extras` adds quality-of-life features to your own Claude
+Code outside the sandbox too, in `~/.claude/settings.json`. For now that is the notice an agent gets shortly
+before auto-compaction. Added once (running it again changes nothing); `uninstall.sh` removes it.
+
 ## Set up a project
 ```bash
 containedclaude init ~/projects/myanalysis
