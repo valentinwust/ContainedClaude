@@ -1,1 +1,8 @@
-{ "modules": ["./register.ts"] }
+{
+  "modules": ["./register.ts"],
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "/usr/bin/python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/notice.py\"" }] }
+    ]
+  }
+}

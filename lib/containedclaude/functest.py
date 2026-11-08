@@ -12,6 +12,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import select
 import shutil
 import socket
@@ -516,6 +517,22 @@ def session_checks(td):
                 os.unlink(f)
         return "warns once 25k before compaction, again after a drop (%d steps)" % len(steps)
     check("notice close to auto-compaction (context_notice)", context_notice)
+    def idle_notice():
+        # the idle-compact mod's line (register.ts) gets the hidden notice from its UserPromptSubmit hook
+        mod = os.path.join(CLONE, "sandbox", "mods", "idle-compact", "hooks")
+        with open(os.path.join(mod, "register.ts")) as fh:
+            line = re.search(r"LINE = .*?\n\s*`([^`]*)`", fh.read()).group(1)
+        line = line.replace("${min}", "50").replace("${k}", "210")
+        def said(prompt):
+            out = subprocess.run([sys.executable, "-I", os.path.join(mod, "notice.py")],
+                                 input=json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": prompt}),
+                                 universal_newlines=True, stdout=subprocess.PIPE, timeout=30).stdout
+            return ((json.loads(out) if out.strip() else {}).get("hookSpecificOutput") or {}).get(
+                "additionalContext", "")
+        assert "compacted right after your reply" in said(line), "no notice for %r" % line
+        assert not said("Remember: " + line), "a notice for another prompt"
+        return "the mod's line gets the notice, other prompts don't"
+    check("idle compaction notice (idle-compact mod)", idle_notice)
     def host_extras():
         # install.sh --extras on a sample settings.json: added once (an older clone's entry replaced), the user's
         # own entries kept, remove restores the file
