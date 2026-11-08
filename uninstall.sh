@@ -46,7 +46,8 @@ for rc in "$HOME/.bashrc" "${ZDOTDIR:-$HOME}/.zshrc"; do
 done
 
 # 1c. the extras (install.sh --extras) in the user's own Claude settings.json
-if /usr/bin/python3 -I "$here/lib/containedclaude/host_extras.py" status >/dev/null 2>&1; then
+st=0; /usr/bin/python3 -I "$here/lib/containedclaude/host_extras.py" status >/dev/null 2>&1 || st=$?
+if (( st != 1 )); then
   /usr/bin/python3 -I "$here/lib/containedclaude/host_extras.py" remove
 fi
 

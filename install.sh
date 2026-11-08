@@ -3,8 +3,10 @@
 #   ./install.sh [--shell-guard] [--extras] [SITE_TEMPLATE]   default template: site.curry.ini (site.example.ini elsewhere)
 #   --shell-guard: one line in ~/.bashrc (or ~/.zshrc) that loads lib/shell-guard.sh: `claude` / `codex` in a
 #                  ContainedClaude project ask whether to start contained; adds `cclaude` / `ccodex`
-#   --extras:      quality-of-life features for Claude Code outside the sandbox too, in your own settings.json
-#                  (for now the notice before auto-compaction); added once, run from this clone
+#   --extras:      quality-of-life features for Claude Code outside the sandbox too, in your own settings.json:
+#                  the notice before auto-compaction and compaction before an idle session's prompt cache
+#                  expires, with the [claude] values of site.ini; added once, run from this clone (again after
+#                  changing those values)
 set -euo pipefail
 here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 guard=0 extras=0 template=site.curry.ini
@@ -12,7 +14,7 @@ for a in "$@"; do
   case "$a" in
     --shell-guard) guard=1;;
     --extras) extras=1;;
-    -h|--help) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     -*) echo "usage: $0 [--shell-guard] [--extras] [SITE_TEMPLATE]" >&2; exit 2;;
     *) template="$a";;
   esac
@@ -54,6 +56,11 @@ elif [[ -n "$rc" ]] && ! grep -qF -- "$mark" "$rc" 2>/dev/null; then
 fi
 if (( extras )); then
   /usr/bin/python3 -I "$here/lib/containedclaude/host_extras.py" add
-elif ! /usr/bin/python3 -I "$here/lib/containedclaude/host_extras.py" status >/dev/null 2>&1; then
-  echo "optional: $here/install.sh --extras adds the notice before auto-compaction to Claude Code outside the sandbox too"
+else
+  st=0; /usr/bin/python3 -I "$here/lib/containedclaude/host_extras.py" status >/dev/null 2>&1 || st=$?
+  if (( st == 2 )); then
+    echo "note: the extras in your Claude settings are outdated (site.ini [claude] or the clone moved): $here/install.sh --extras updates them"
+  elif (( st != 0 )); then
+    echo "optional: $here/install.sh --extras adds the compaction notices (before auto-compaction, and before an idle session's cache expires) to Claude Code outside the sandbox too"
+  fi
 fi

@@ -1,0 +1,1 @@
+{ "name": "idle-compact", "version": "1.0.0", "description": "ContainedClaude: before the prompt cache expires in an idle session, ask the agent for notes, then compact" }

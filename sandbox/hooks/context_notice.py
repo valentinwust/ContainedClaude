@@ -17,7 +17,7 @@ import stat
 import sys
 
 BUFFER = 33000                                 # Claude Code compacts this far below the window
-MARGIN = 25000                                 # warn this far before that: room to write notes
+MARGIN = 25000                                 # warn this far before that: room to write notes (default)
 DEFAULT_WINDOW, LONG_WINDOW = 200000, 1000000
 TAIL = 65536
 STATE = "/tmp/.containedclaude-context-%d" % os.getuid()     # private /tmp in the sandbox, shared outside
@@ -172,6 +172,12 @@ def main():
     if not data.get("tool_use_id") or data.get("tool_use_id") not in ids:     # this result, unless written
         after += len(json.dumps(data.get("tool_response")))
     tokens += after // 3
+    try:                     # the config's [claude] compact_notice, through the session settings' env; 0 = off
+        margin = int(os.environ.get("CONTAINEDCLAUDE_COMPACT_NOTICE", MARGIN))
+    except ValueError:
+        margin = MARGIN
+    if margin <= 0:
+        return 0
     project = os.environ.get("CLAUDE_PROJECT_DIR") or data.get("cwd") or os.getcwd()
     w = window(model, tokens, data.get("agent_type") if agent else None, project)
     d = state_dir()
@@ -179,7 +185,7 @@ def main():
         return 0
     flag = os.path.join(d, "".join(c if c.isalnum() or c in "-_" else "_" for c in session + "." + (agent or "main")))
     trigger = w - BUFFER
-    if tokens < trigger - MARGIN:
+    if tokens < trigger - margin:
         if os.path.exists(flag):
             try:
                 os.unlink(flag)

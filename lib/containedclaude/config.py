@@ -115,6 +115,12 @@ DEFAULTS = {
         "executed_dir": "jobs/executed",
         "apptainer_cache": ".cache/apptainer",
     },
+    "claude": {
+        "compact_notice": "25000",           # tokens before auto-compaction to tell the agent; 0 = never
+        "idle_compact": "yes",               # notes + compaction before the prompt cache expires (sandbox/mods)
+        "idle_compact_after": "50",          # minutes idle (the cache lasts 60)
+        "idle_compact_min_tokens": "200000",
+    },
 }
 
 

@@ -813,6 +813,20 @@ def claude_settings(cfg):
         "permissions": {"deny": ["RemoteTrigger"]}}
 
 
+def claude_env(cfg, user):
+    """The [claude] values for every Claude process of the sandbox, through the settings' env block (also the
+    sessions a Remote Control server starts): the compaction notice hook's margin and, with idle_compact, the
+    idle-compact mod (CLAUDE_CODE_PLUGIN_DIRS, after any folders of the user's own) and its values."""
+    env = {"CONTAINEDCLAUDE_COMPACT_NOTICE": cfg.get("claude", "compact_notice") or "0"}
+    if cfg.bool("claude", "idle_compact"):
+        own = (user.get("env") or {}).get("CLAUDE_CODE_PLUGIN_DIRS") if isinstance(user.get("env"), dict) else None
+        mod = os.path.join(CLONE, "sandbox", "mods", "idle-compact")
+        env.update(CLAUDE_CODE_PLUGIN_DIRS=os.pathsep.join(([own] if own else []) + [mod]),
+                   CONTAINEDCLAUDE_IDLE_COMPACT_AFTER=cfg.get("claude", "idle_compact_after"),
+                   CONTAINEDCLAUDE_IDLE_COMPACT_MIN_TOKENS=cfg.get("claude", "idle_compact_min_tokens"))
+    return env
+
+
 def session_settings(cfg, user):
     """The contained config's settings (`user`, parsed) with claude_settings added, plus no MCP servers unless
     mcp_from_user_config: what Claude reads as that settings.json in the project's sandbox. Every Claude
@@ -829,6 +843,7 @@ def session_settings(cfg, user):
     out["hooks"] = dict(hooks, **{e: hooks.get(e, []) + h for e, h in ours["hooks"].items()})
     deny = perms.get("deny", [])
     out["permissions"] = dict(perms, deny=deny + [r for r in ours["permissions"]["deny"] if r not in deny])
+    out["env"] = dict(user.get("env") if isinstance(user.get("env"), dict) else {}, **claude_env(cfg, user))
     if not cfg.bool("sandbox", "mcp_from_user_config"):
         out["allowedMcpServers"] = []       # no MCP servers (with --strict-mcp-config, where it can be passed)
         out["disableClaudeAiConnectors"] = True     # claude.ai connectors not even loaded: blocked ones are

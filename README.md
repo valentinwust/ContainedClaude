@@ -43,15 +43,13 @@ partition, GPUs, shares to mount, limits and where projects may live. Uninstall:
 `~/ContainedClaude/uninstall.sh` (`--state` also removes the contained Claude and Codex login and config),
 then delete the clone. Projects stay normal folders.
 
-**Shell guard (optional).** `~/ContainedClaude/install.sh --shell-guard` adds one line to `~/.bashrc` (or
-`~/.zshrc`). Typing `claude` or `codex` in a contained project then asks first: Enter starts it contained, `u`
-as usual. Elsewhere nothing changes, and `command claude` skips the question. `cclaude` and `ccodex` start
-Claude or Codex contained in the current folder's project and pass their arguments on; `cclaude server` starts
-the Remote Control server. Everything else (`init`, `shell`, `test`, ...) stays `containedclaude`.
-
-**Extras (optional).** `~/ContainedClaude/install.sh --extras` adds quality-of-life features to your own Claude
-Code outside the sandbox too, in `~/.claude/settings.json`. For now that is the notice an agent gets shortly
-before auto-compaction. Added once (running it again changes nothing); `uninstall.sh` removes it.
+Optional, both undone by `uninstall.sh`:
+- `install.sh --shell-guard` adds a line to `~/.bashrc` (or `~/.zshrc`): `claude` or `codex` typed in a
+  contained project asks first (Enter: contained, `u`: as usual; `command claude` skips it). `cclaude` and
+  `ccodex` start them contained in the current folder's project, `cclaude server` the Remote Control server.
+- `install.sh --extras` adds the compaction notices (see Configure) to your own Claude Code too, in
+  `~/.claude/settings.json`, with the `[claude]` values of `site.ini` as they are then: run it again after
+  changing them.
 
 ## Set up a project
 ```bash
@@ -99,18 +97,15 @@ Caches (pip, conda, Hugging Face, ...) go to `<project>/.cache/`, new conda envi
 (`conda create -p ./envs/x`). Big transfers run as jobs too.
 
 ## Remote Control
-`containedclaude DIR -- --remote-control` lets you follow and continue a session from claude.ai or the Claude
-app. `containedclaude server DIR` (or `cclaude server`) runs the Remote Control server: keep it running in
-tmux and start new contained sessions in the project from claude.ai/code or the app. It opens one session at
-start. Stopped with Ctrl+C, it keeps its sessions on claude.ai: started again in that folder within 4 hours,
-it takes back the first one at once and each other one as soon as you open or message it.
-Its sessions share the server's sandbox and limits, so at most 6 run at once (`--capacity N` changes that).
-After you stop a server, claude.ai counts it for about a minute longer and refuses a new one in that folder
-("already served").
-
-The server's worktree mode (`--spawn worktree`, or `w` while it runs) is not supported. Its separate git
-checkouts would add no containment here, and they hold only the files git tracks, so sessions there would
-miss your data and results.
+`containedclaude DIR -- --remote-control` lets you follow a session from claude.ai or the Claude app.
+`containedclaude server DIR` (or `cclaude server`) runs the Remote Control server: keep it running in tmux and
+start contained sessions in the project from claude.ai/code or the app.
+- Its sessions share the server's sandbox and limits: at most 6 at once (`--capacity N`).
+- Stopped with Ctrl+C and started again in that folder within 4 hours, it takes back its sessions: the first at
+  once, the others when you open or message them. For about a minute after a stop, claude.ai still refuses a
+  new server there ("already served").
+- Worktree mode (`--spawn worktree`, `w`) is not supported: those checkouts hold only what git tracks, so your
+  data and results would be missing.
 
 ## Codex
 Codex runs in the same sandbox with the same limits: `containedclaude shell DIR -- codex` (`ccodex` with the
@@ -121,23 +116,29 @@ containedclaude shell ~/projects/myanalysis -- codex login --device-auth      # 
 containedclaude admin          # the plugin for Claude: /plugin marketplace add openai/codex-plugin-cc,
                                # /plugin install codex@openai-codex, then /exit
 ```
-For long jobs, let Codex wait on a running command for its maximum of 2 h instead of 5 min: put
-`background_terminal_max_timeout = 7200000` near the top of
-`~/.local/share/containedclaude/codex-home/config.toml`, above the first `[section]`.
+For long jobs, `background_terminal_max_timeout = 7200000` above the first `[section]` of
+`~/.local/share/containedclaude/codex-home/config.toml` lets Codex wait on a command for 2 h instead of 5 min.
 
 ## Configure
-The project's `.contained/config.ini` (read-only for the agent) lists every setting with a comment: write
-paths, shares to mount, hidden and protected paths, session limits, job defaults and limits, extra `sbatch`
-options. It overrides `site.ini`, which overrides the built-in defaults. Changes apply to the next session or
+The project's `.contained/config.ini` (read-only for the agent) lists every setting with a comment. It
+overrides `site.ini` in the clone, which overrides the built-in defaults; changes apply to the next session or
 job.
+- `[sandbox]`, `[jobs]`: write paths, shares to mount, hidden and protected paths, session limits, job defaults
+  and limits, extra `sbatch` options.
+- `[claude]`, the compaction notices: `compact_notice` tells an agent this many tokens before auto-compaction
+  that it may want to write down what matters (25000; 0 = never). With `idle_compact`, a session idle for
+  `idle_compact_after` minutes (50) with at least `idle_compact_min_tokens` (200000) is asked for notes and
+  compacted right after its answer, before the 1-hour prompt cache expires and your next message would send
+  the whole context again at full price. Claude Code does that itself only in a terminal; this covers Remote
+  Control sessions too.
 
-**Model, effort, auto-compaction.** These live in the contained config, which applies to all contained projects
-(your own `~/.claude` and `~/.codex` only apply outside). Claude: `modelSettings` (per model `autoCompactWindow`,
-`effortLevel`) and `effortLevel` in `~/.local/share/containedclaude/claude-config/settings.json`; each project
-copies it when its sandbox starts, so a running server keeps the old values until restarted. Codex: `model`,
-`model_reasoning_effort` and `model_auto_compact_token_limit` above the first `[section]` of
-`~/.local/share/containedclaude/codex-home/config.toml`; new Codex sessions use them at once. Edit the files
-directly or with `containedclaude admin` / `admin codex`.
+Model, effort and auto-compaction window are Claude's and Codex's own settings, in the contained config shared
+by all projects (change them with `containedclaude admin` / `admin codex`, or edit the files):
+- Claude: `modelSettings` (`autoCompactWindow`, `effortLevel` per model) and `effortLevel` in
+  `~/.local/share/containedclaude/claude-config/settings.json`, copied at each sandbox start (a running server
+  keeps the old values).
+- Codex: `model`, `model_reasoning_effort`, `model_auto_compact_token_limit` above the first `[section]` of
+  `~/.local/share/containedclaude/codex-home/config.toml`, used by every new Codex session.
 
 ## Check and update
 ```bash
@@ -145,10 +146,9 @@ containedclaude test ~/projects/myanalysis     # what should work (seconds); --j
 containedclaude doctor ~/projects/myanalysis   # what must be blocked; --jobs --gpu also inside jobs
 containedclaude update ~/projects/myanalysis   # update the clone, Claude Code and Codex, then check
 ```
-`test` must end with `EVERYTHING WORKS`, `doctor` with `ALL CHECKS PASSED`. Run both after updating bwrap,
-apptainer or Slurm. After a Claude Code or Codex update, the first start runs the doctor by itself, and once a
-day the first start says when something is behind. One clone serves all projects, so pulling it updates them
-all. Contained sessions can't update Claude Code or Codex themselves. Plugins: `containedclaude admin`, then
+`test` must end with `EVERYTHING WORKS`, `doctor` with `ALL CHECKS PASSED`; run both after updating bwrap,
+apptainer or Slurm. After a Claude Code or Codex update the first start runs the doctor itself, and once a day
+it says when something is behind. One clone serves all projects. Plugins: `containedclaude admin`, then
 `/plugin update`.
 
 ## Commands

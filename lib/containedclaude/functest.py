@@ -325,8 +325,20 @@ def session_checks(td):
             except ValueError:
                 continue
             raise AssertionError("settings Claude Code does not read were accepted: %r" % bad)
-        return "hooks, RemoteTrigger denied, %s; the user's own settings kept" % (
-            "no MCP servers" if no_mcp else "MCP servers from the config")
+        # [claude] through the env block: the notice margin, and the idle-compact mod after the user's own folders
+        env = st.get("env") or {}
+        assert env.get("CONTAINEDCLAUDE_COMPACT_NOTICE") == (cfg.get("claude", "compact_notice") or "0"), \
+            "compact_notice not passed: %r" % env
+        mod = os.path.join(CLONE, "sandbox", "mods", "idle-compact")
+        dirs = (env.get("CLAUDE_CODE_PLUGIN_DIRS") or "").split(os.pathsep)
+        assert (mod in dirs) == cfg.bool("claude", "idle_compact"), "idle-compact mod: %r" % env
+        assert os.path.isfile(os.path.join(mod, "hooks", "register.ts")), "the idle-compact mod is missing"
+        own = project.session_settings(cfg, {"env": {"CLAUDE_CODE_PLUGIN_DIRS": "/x", "K": "v"}})["env"]
+        assert own["K"] == "v" and own["CLAUDE_CODE_PLUGIN_DIRS"].split(os.pathsep)[0] == "/x", \
+            "the user's own env entries were not kept: %r" % own
+        return "hooks, RemoteTrigger denied, %s, [claude] values%s; the user's own settings kept" % (
+            "no MCP servers" if no_mcp else "MCP servers from the config",
+            ", idle-compact mod" if mod in dirs else "")
     check("the launcher's settings reach every Claude process", launcher_settings if cfgdir else lambda: False)
     if ARGS.get("unknown_folder") and cfgdir:     # made by `containedclaude test` on the host before the start
         n = ARGS["unknown_folder"]
@@ -462,6 +474,7 @@ def session_checks(td):
             sub_t = os.path.join(d, sid, "subagents", "agent-a1.jsonl")
             env = dict(os.environ, CLAUDE_CONFIG_DIR=d, CLAUDE_PROJECT_DIR=d)
             env.pop("CLAUDE_CODE_AUTO_COMPACT_WINDOW", None)
+            env.pop("CONTAINEDCLAUDE_COMPACT_NOTICE", None)          # the default margin, 25k
             hook = os.path.join(CLONE, "sandbox", "hooks", "context_notice.py")
             def said(agent=None, result="", tool_id="t-own"):
                 payload = {"hook_event_name": "PostToolUse", "tool_name": "Read", "session_id": sid,
@@ -513,7 +526,8 @@ def session_checks(td):
             old = {"matcher": "*", "hooks": [{"type": "command",
                                               "command": "/usr/bin/python3 -I /old/sandbox/hooks/context_notice.py"}]}
             with open(f, "w") as fh:
-                json.dump({"model": "x", "hooks": {"PostToolUse": [mine, old]}}, fh)
+                json.dump({"model": "x", "env": {"K": "v", "CLAUDE_CODE_PLUGIN_DIRS": "/own"},
+                           "hooks": {"PostToolUse": [mine, old]}}, fh)
             def read_json(p):
                 with open(p) as fh:
                     return json.load(fh)
@@ -522,15 +536,20 @@ def session_checks(td):
             def run(cmd):
                 return subprocess.run(["/usr/bin/python3", "-I", tool, cmd], env=env, stdout=subprocess.PIPE,
                                       stderr=subprocess.STDOUT, universal_newlines=True, timeout=30).returncode
+            assert run("status") == 2, "an older clone's hook is not reported as outdated"
             assert run("add") == 0 and run("add") == 0 and run("status") == 0, "add failed"
+            env_ = read_json(f)["env"]
+            assert env_["K"] == "v" and env_["CLAUDE_CODE_PLUGIN_DIRS"].split(os.pathsep)[0] == "/own" and \
+                "CONTAINEDCLAUDE_COMPACT_NOTICE" in env_, "env after add: %r" % env_
             post = read_json(f)["hooks"]["PostToolUse"]
             ours = [e for e in post if "context_notice.py" in json.dumps(e)]
             assert post[0] == mine and len(ours) == 1 and CLONE in json.dumps(ours[0]), "after add: %r" % post
             assert run("remove") == 0 and run("status") == 1, "remove failed"
-            assert read_json(f) == {"model": "x", "hooks": {"PostToolUse": [mine]}}, "after remove: %r" % read_json(f)
+            assert read_json(f) == {"model": "x", "env": {"K": "v", "CLAUDE_CODE_PLUGIN_DIRS": "/own"},
+                                    "hooks": {"PostToolUse": [mine]}}, "after remove: %r" % read_json(f)
         finally:
             shutil.rmtree(d, ignore_errors=True)
-        return "added once, own entries kept, removed again"
+        return "hook, mod and values added once, own entries kept, removed again"
     check("extras in the user's own settings (install.sh --extras)", host_extras)
     def shell_guard():
         fake = os.path.join(td, "guardbin")
