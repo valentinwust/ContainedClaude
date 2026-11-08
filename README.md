@@ -47,9 +47,9 @@ Optional, both undone by `uninstall.sh`:
 - `install.sh --shell-guard` adds a line to `~/.bashrc` (or `~/.zshrc`): `claude` or `codex` typed in a
   contained project asks first (Enter: contained, `u`: as usual; `command claude` skips it). `cclaude` and
   `ccodex` start them contained in the current folder's project, `cclaude server` the Remote Control server.
-- `install.sh --extras` adds the compaction notices (see Configure) to your own Claude Code too, in
-  `~/.claude/settings.json`, with the `[claude]` values of `site.ini` as they are then: run it again after
-  changing them.
+- `install.sh --extras` adds the compaction notice and idle compaction (`[claude]`, see Configure) to your own
+  Claude Code too, in `~/.claude/settings.json`, with the values of `site.ini` as they are then: run it again
+  after changing them.
 
 ## Set up a project
 ```bash
@@ -125,12 +125,12 @@ overrides `site.ini` in the clone, which overrides the built-in defaults; change
 job.
 - `[sandbox]`, `[jobs]`: write paths, shares to mount, hidden and protected paths, session limits, job defaults
   and limits, extra `sbatch` options.
-- `[claude]`, the compaction notices: `compact_notice` tells an agent this many tokens before auto-compaction
-  that it may want to write down what matters (25000; 0 = never). With `idle_compact`, a session idle for
-  `idle_compact_after` minutes (50) with at least `idle_compact_min_tokens` (200000) is asked for notes and
-  compacted right after its answer, before the 1-hour prompt cache expires and your next message would send
-  the whole context again at full price. Claude Code does that itself only in a terminal; this covers Remote
-  Control sessions too.
+- `[claude]`, compaction notice and idle compaction: `compact_notice` tells an agent this many tokens before
+  auto-compaction that it may want to write down what matters (25000; 0 = never). With `idle_compact`, a
+  session idle for `idle_compact_after` minutes (50) with at least `idle_compact_min_tokens` (200000) is asked
+  for notes and compacted right after its answer, before the 1-hour prompt cache expires and your next message
+  would send the whole context again at full price. Claude Code does that itself only in a terminal; this
+  covers Remote Control sessions too.
 
 Model, effort and auto-compaction window are Claude's and Codex's own settings, in the contained config shared
 by all projects (change them with `containedclaude admin` / `admin codex`, or edit the files):
