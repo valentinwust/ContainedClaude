@@ -76,7 +76,7 @@ Image cache: `{{apptainer_cache}}`.
 
 ## Other tools
 - **The same instructions for many texts** (summarise, classify, extract): `cc-ask-batch [--model
-  haiku|sonnet|opus] [--schema S.json] PROMPT_FILE TASKS.csv` (columns `text`, `out`), one model call per row
+  haiku|sonnet|opus] [--effort high] [--schema S.json] PROMPT_FILE TASKS.csv` (columns `text`, `out`), one model call per row
   without tools, the shared prompt read from the cache; one text: `cc-ask PROMPT_FILE TEXT_FILE OUT_FILE`
   (`cc-ask --help`).
 

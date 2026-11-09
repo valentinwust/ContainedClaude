@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""cc-ask       [--model MODEL] [--schema SCHEMA_FILE] PROMPT_FILE TEXT_FILE OUT_FILE
-cc-ask-batch [--model MODEL] [--schema SCHEMA_FILE] [-j N] PROMPT_FILE TASKS.csv
+"""cc-ask       [--model MODEL] [--effort LEVEL] [--schema SCHEMA_FILE] PROMPT_FILE TEXT_FILE OUT_FILE
+cc-ask-batch [--model MODEL] [--effort LEVEL] [--schema SCHEMA_FILE] [-j N] PROMPT_FILE TASKS.csv
 
 One model call per text, without tools: PROMPT_FILE is the system prompt, the text the message, the reply is
 written to a file. Runs `claude -p` on the user's Claude subscription (default model haiku; also sonnet, opus).
 With --schema (a JSON Schema file), the reply is JSON in exactly that shape (checked; still one request),
 e.g. one field per question: {"type":"object","properties":{"q1":{"type":"string"},...},"required":[...]}.
+The model thinks as much as it judges the text needs (none for easy ones); --effort low|medium|high|xhigh|max
+moves that (a lean, not a limit: nothing caps thinking). Thinking is billed as output and counts in the reply's
+tokens.
 
 cc-ask: one text; prints how much input came from the prompt cache, the reply's tokens and the cost (the
 price `claude -p` reports: what it would cost via the API; the subscription doesn't bill per token).
@@ -32,6 +35,7 @@ import shutil
 import subprocess
 import sys
 
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
 KEYS = ("cache_read_input_tokens", "cache_creation_input_tokens", "input_tokens", "output_tokens")
 
 
@@ -128,10 +132,14 @@ def batch(cmd, path, jobs):
 
 
 def main(prog, argv):
-    model, schema, jobs = "haiku", None, 8
-    while argv[:1] in (["--model"], ["--schema"], ["-j"]) and len(argv) > 1:
+    model, effort, schema, jobs = "haiku", None, None, 8
+    while argv[:1] in (["--model"], ["--effort"], ["--schema"], ["-j"]) and len(argv) > 1:
         if argv[0] == "--model":
             model = argv[1]
+        elif argv[0] == "--effort":
+            if argv[1] not in EFFORTS:
+                sys.exit("%s: --effort takes %s" % (prog, ", ".join(EFFORTS)))
+            effort = argv[1]
         elif argv[0] == "--schema":
             schema = argv[1]
         elif prog == "cc-ask-batch" and argv[1].isdigit() and 1 <= int(argv[1]) <= 16:
@@ -154,6 +162,8 @@ def main(prog, argv):
         sys.exit("%s: no such file: %s" % (prog, text))
     cmd = [claude, "-p", "--model", model, "--system-prompt-file", prompt, "--tools", "", "--strict-mcp-config",
            "--setting-sources", "", "--disable-slash-commands", "--no-session-persistence", "--output-format", "json"]
+    if effort:
+        cmd += ["--effort", effort]
     if schema:
         try:
             with open(schema) as fh:
