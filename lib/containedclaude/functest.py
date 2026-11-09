@@ -662,6 +662,11 @@ def session_checks(td):
             return ("skip", "Slurm lists no GPU node")
         return rc == 0 and "NVIDIA-SMI" in out and out.splitlines()[0]
     check("cc-gpu (ssh to a GPU node)", gpu)
+    def ask():      # no model call (it would cost): usage lines and `claude` found; live check in DEVELOPMENT.md §8
+        outs = [sh([c])[1] for c in ("cc-ask", "cc-ask-batch")]
+        return (outs[0].startswith("usage: cc-ask ") and outs[1].startswith("usage: cc-ask-batch ")
+                and shutil.which("claude") and "usage lines; claude on PATH")
+    check("cc-ask, cc-ask-batch (usage only, no model call)", ask)
 
 
 # ----------------------------------------------------------------------------------------------- jobs

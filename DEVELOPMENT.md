@@ -74,6 +74,10 @@ lib/shell-guard.sh             optional (install.sh --shell-guard), sourced by ~
 sandbox/bin/cc (+ cc-run cc-wait cc-jobs cc-cancel cc-log cc-build cc-pull cc-info cc-cluster cc-gpu cc-usage
                                symlinks)
                                client used INSIDE the sandbox; talks JSON to the broker socket
+sandbox/bin/cc-ask (+ cc-ask-batch symlink)
+                               `claude -p` calls without tools: a prompt file as system prompt, a text as the
+                               message, the reply (or --schema JSON) into a file; cc-ask-batch: one per row of
+                               a CSV (text, out), the first alone, then -j N (8) threads; 5-minute cache forced
 sandbox/shim                   stand-in bound over sbatch/ssh/apptainer/... inside the sandbox (prints advice, exit 126)
 sandbox/hooks/write_guard.py   Claude PreToolUse hook for Write/Edit/...: path-based explanation only
 sandbox/hooks/oom_notice.py    Claude PostToolUse hook for Bash: tells the agent when the session's memory
@@ -629,6 +633,21 @@ cache again afterwards (5-minute cache: the subagent default, as subagentPromptC
   doesn't compact and says so in that prompt. 180k: in the replay, compacting at 150-200k paid off 75% of the
   time (break-even 18 requests), at 100-150k 56% (34); "half the window" would be 100k or 500k.
 
+### 5.14 One-shot model calls (sandbox/bin/cc-ask)
+A cost lever, not containment: for many independent texts with the same instructions, a fresh `claude -p` per
+text is cheaper than reading them in one session (whose context grows) or in subagents (which carry Claude
+Code's tools and prompt, and report into the caller's context). `--system-prompt-file` replaces Claude Code's
+prompt, `--tools ""` `--strict-mcp-config` `--setting-sources ""` `--disable-slash-commands` leave nothing else,
+CLAUDE_CODE_PLUGIN_DIRS is dropped (no mods); one turn, no compaction (nothing before the one request). The
+prompt is the cached prefix; the message (the text plus ~600 tokens Claude Code adds) is new each call.
+`claude -p` writes the 1-hour cache by default (2x input); FORCE_PROMPT_CACHING_5M=1 makes it 5-minute
+(1.25x), as the calls follow one another. --json-schema adds a StructuredOutput tool the model answers with:
+still one API request (num_turns says 2, but the tool result is only recorded, not sent; measured on Haiku 5.5).
+The tool definition precedes the system prompt in the cached prefix, so the schema must stay the same too. Not --bare: it allows only
+ANTHROPIC_API_KEY, so it would bypass the subscription login. Texts go through stdin (one argument may hold at
+most 128 KB), hence a CSV rather than arguments for cc-ask-batch. -j: one call is ~210 MB, 11-14 threads and
+~2 CPU-seconds over ~5 s, so session_tasks (300 for the whole session) limits first; 16 at most.
+
 ---------------------------------------------------------------------------------------------------------------
 ## 6. Version dependencies (what can break when tools update) and where to fix
 
@@ -643,6 +662,7 @@ cache again afterwards (5-minute cache: the subagent default, as subagentPromptC
 | Codex CLI (0.166.0) | its own sandbox = a bwrap + seccomp inner layer; needs /tmp to be a real mount (mount root "/") and, for sockets, `[sandbox_workspace_write] network_access = true` in CODEX_HOME/config.toml (seeded by ensure_state); `[features] daemon_auto_start = false` (seeded: otherwise the TUI copies its binary into packages/ and runs a background server); folder trust `[projects."<path>"] trust_level` (written by codex_trust; Codex can't write config.toml in sessions) | `containedclaude test` runs a command under `codex sandbox` (writes the project, reaches the broker); failure shows there and as "bwrap: Can't mkdir parents ..." or "broker not reachable (Operation not permitted)" in Codex output |
 | Claude Code context and compaction (2.1.319) | context_notice.py: PostToolUse input session_id, transcript_path, agent_id/agent_type (subagents only), tool_response, tool_use_id; user records' message.content (tool_result items with tool_use_id), attachment records; transcript records type assistant + message.usage (input + cache_creation_input + cache_read_input tokens) and message.model; subagent transcripts in <session>/subagents/agent-<id>.jsonl; autoCompactWindow in modelSettings / agent frontmatter / CLAUDE_CODE_AUTO_COMPACT_WINDOW; a fixed 33k buffer below the window | the notice comes late, early or never; test's check uses sample transcripts and can't see that, the occasional manual check in §8 does. `/context` (`claude -p /context`, no model call) shows the current buffer |
 | Claude Code mods (2.1.319) | idle-compact: CLAUDE_CODE_PLUGIN_DIRS read from the settings' env block (inline plugin, hooks module); `turn.start` / `turn.complete` (agentId absent on the main loop, reason), `$.session.usage().context.tokens`, `$.clock.after`, `$.prompt.submit` (works in an idle SDK session; the plugin's UserPromptSubmit command hook sees it, its own `prompt.submit` hooks don't), `$.command.run({ command: "compact", args })` (works in SDK sessions, where `$.session.compact()` refuses), `$.env.get`; Claude Code's own idle compaction still skipping SDK sessions | no notice or no compaction in idle sessions; if Claude Code starts idle-compacting SDK sessions itself, the mod still acts first (50 min) and can stay or go. `claude plugin validate sandbox/mods/idle-compact` and the manual check in §8 |
+| Claude Code one-shot calls (cc-ask, 2.1.319) | `claude -p` flags --system-prompt-file --tools "" --strict-mcp-config --setting-sources "" --disable-slash-commands --no-session-persistence --output-format json --json-schema; result fields result, structured_output, is_error, usage.cache_read/cache_creation_input_tokens; env FORCE_PROMPT_CACHING_5M | cc-ask fails or loses its cache hits (from cache 0 on the second call); the manual check in §8 |
 | Claude Code agent types and compaction on request (2.1.319) | cc mod: plugin agents/*.md with name, description, model inherit, autoCompactWindow, experimental.cacheTtl (kept for plugin agents, which drop permissionMode/hooks/mcpServers); usage.cache_creation.ephemeral_1h/5m_input_tokens in subagent transcripts; their prompt is a copy of the general-purpose agent's (function returning "You are an agent for Claude Code..." in the binary); `turn.complete`'s result `text` (the answer), `$.command.run` compact, `$.prompt.submit` | the types are missing from the Agent tool, a job-worker writes 5-minute cache (ephemeral_5m), or a `[[compact]]` reply isn't compacted; the manual check in §8. After a Claude Code update compare the general-purpose prompt with the agent files' text |
 | util-linux unshare (2.37.4), jobs | --user --map-current-user --mount --propagation private | compat.outer_unshare: falls back to --map-user=UID --map-group=GID (never -r: that maps to root) |
 | apptainer 1.5.5 | exec --userns --containall --workdir --home --pwd --nv --bind --env; build --fakeroot; pull | jobwrap: --userns/--containall/--workdir only if `apptainer exec --help` lists them (compat.likely: if --help is unreadable, pass everything as before); APPTAINER_USERNS=1 forces userns anyway. Security does not depend on these: the surrounding bwrap sandbox decides ro/rw |
@@ -795,6 +815,13 @@ the agent's next answer still has the code word. Repeated inside a throwaway pro
 claude ...`, compact_offer = 3000 in its config.ini): workers spawned from a Haiku session with `model: sonnet`
 ran on Sonnet with the right cache tiers, the marker compacted; with compact_offer = 900000 (a 25k context is
 below 2/3 of it) the agent got the "Not compacted" prompt instead.
+
+Occasional manual check of cc-ask (2026-11-09, 2.1.319, Haiku 5.5): in a throwaway project, a ~14k-token
+prompt file new to the cache and a tasks.csv of 12 rows (texts with quotes, commas, line breaks; outs in two
+sub-folders); `containedclaude shell P -- cc-ask-batch prompt.md tasks.csv`: "written to cache" is about the
+prompt once plus ~600 per further row (20.5k), no cache misses, 12 files; a second run after deleting one
+reply does only that row; `--schema` (three fields) writes JSON of that shape, still from the cache; a CSV
+without the columns or with an out twice is refused. (20 rows took 13 s with -j 8.)
 
 ---------------------------------------------------------------------------------------------------------------
 ## 9. How to change common things

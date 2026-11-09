@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""cc-ask       [--model MODEL] [--schema SCHEMA_FILE] PROMPT_FILE TEXT_FILE OUT_FILE
+cc-ask-batch [--model MODEL] [--schema SCHEMA_FILE] [-j N] PROMPT_FILE TASKS.csv
+
+One model call per text, without tools: PROMPT_FILE is the system prompt, the text the message, the reply is
+written to a file. Runs `claude -p` on the user's Claude subscription (default model haiku; also sonnet, opus).
+With --schema (a JSON Schema file), the reply is JSON in exactly that shape (checked; still one request),
+e.g. one field per question: {"type":"object","properties":{"q1":{"type":"string"},...},"required":[...]}.
+
+cc-ask: one text; prints how much input came from the prompt cache, the reply's tokens and the cost (the
+price `claude -p` reports: what it would cost via the API; the subscription doesn't bill per token).
+cc-ask-batch: TASKS.csv has a header row with the columns `text` (the text itself; quote it if it holds commas,
+quotes or line breaks, as Python's csv module and pandas' to_csv do) and `out` (the reply's file, relative to
+the current folder; folders are created). The first call runs alone, then N at a time (default 8, at most 16).
+Rows whose `out` exists are skipped, so after a failure run it again. Prints failures, cache misses, a total.
+
+The prompt is read from the cache, and only the text and the reply are new, if:
+  - PROMPT_FILE (and --schema, which sits before it in the cached part) is byte-identical in every call;
+    everything that varies goes into the text.
+  - Calls follow each other with no gap over 5 minutes (the cache's lifetime; every call restarts it), and the
+    first call has finished before others start (calls started together each write their own cache).
+    cc-ask-batch does both; with cc-ask, run one alone first.
+  - From the second call on, "from cache" is about the prompt's size. Prompts under about 500 tokens are not
+    cached, but cost little anyway.
+On haiku a call costs 5x as much once prompt and text together exceed 100k tokens.
+"""
+import concurrent.futures
+import csv
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+KEYS = ("cache_read_input_tokens", "cache_creation_input_tokens", "input_tokens", "output_tokens")
+
+
+class Failed(Exception):
+    pass
+
+
+def ask(cmd, text, out):
+    """One call with the message `text` (bytes): the reply into `out` (written whole or not at all).
+    Returns (usage, cost in USD)."""
+    env = dict(os.environ, FORCE_PROMPT_CACHING_5M="1")
+    for k in ("CLAUDE_CODE_PLUGIN_DIRS", "ENABLE_PROMPT_CACHING_1H", "CLAUDE_CODE_PROMPT_CACHE_TTL",
+              "CLAUDE_CODE_MESSAGES_PROMPT_CACHE_TTL"):
+        env.pop(k, None)            # no mods (idle compaction etc.), and the 5-minute cache always
+    p = subprocess.run(cmd, input=text, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    try:
+        d = json.loads(p.stdout)
+    except ValueError:
+        raise Failed("claude failed (exit %d): %s" % (p.returncode, (p.stderr or p.stdout).decode()[-2000:]))
+    schema = "--json-schema" in cmd
+    if d.get("is_error") or not isinstance(d.get("result"), str) or (schema and d.get("structured_output") is None):
+        raise Failed(str(d.get("result") or d.get("subtype") or "no reply"))
+    reply = json.dumps(d["structured_output"], ensure_ascii=False, indent=1) if schema else d["result"]
+    with open(out + ".part", "w") as fh:
+        fh.write(reply.rstrip("\n") + "\n")
+    os.replace(out + ".part", out)
+    u = d.get("usage") or {}
+    return {k: u.get(k) or 0 for k in KEYS}, d.get("total_cost_usd") or 0
+
+
+def line(u):
+    return "input %d from cache, %d written to cache, %d uncached; reply %d tokens" % tuple(u[k] for k in KEYS)
+
+
+def tasks(path):
+    """The rows of TASKS.csv as [(text, out)], or exit with what is wrong."""
+    csv.field_size_limit(1 << 30)
+    try:
+        with open(path, newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+            cols = rows and list(rows[0])
+    except (ValueError, csv.Error) as e:
+        sys.exit("cc-ask-batch: %s: %s" % (path, e))
+    if not rows or not {"text", "out"} <= set(cols):
+        sys.exit("cc-ask-batch: %s needs a header row with the columns text and out, and at least one row" % path)
+    bad = [i + 2 for i, r in enumerate(rows) if not (r["out"] or "").strip() or r["text"] is None]
+    if bad:
+        sys.exit("cc-ask-batch: %s: rows without text or out (line numbers, if no text has line breaks): %s"
+                 % (path, ", ".join(map(str, bad[:20]))))
+    outs = [r["out"].strip() for r in rows]
+    dup = sorted({o for o in outs if outs.count(o) > 1})
+    if dup:
+        sys.exit("cc-ask-batch: the same out in several rows: %s" % ", ".join(dup[:20]))
+    return [(r["text"], o) for r, o in zip(rows, outs)]
+
+
+def batch(cmd, path, jobs):
+    rows = tasks(path)
+    todo = [(t, o) for t, o in rows if not os.path.exists(o)]
+    if not todo:
+        print("cc-ask-batch: nothing to do (%d rows, every out exists)" % len(rows))
+        return 0
+    for d in {os.path.dirname(o) for _, o in todo} - {""}:
+        os.makedirs(d, exist_ok=True)
+    print("cc-ask-batch: %d texts (%d already answered); the first alone, then %d at a time"
+          % (len(todo), len(rows) - len(todo), jobs), flush=True)
+    total, cost, failed, misses = dict.fromkeys(KEYS, 0), [0.0], [], []
+
+    def done(n, res, first=False):
+        u, c = res
+        cost[0] += c
+        for k in KEYS:
+            total[k] += u[k]
+        if not first and u["cache_read_input_tokens"] == 0 and u["cache_creation_input_tokens"] >= 500:
+            misses.append(n)
+
+    try:
+        done(todo[0][1], ask(cmd, todo[0][0].encode(), todo[0][1]), first=True)
+    except Failed as e:
+        sys.exit("cc-ask-batch: %s: %s (stopped before the rest)" % (todo[0][1], e))
+    with concurrent.futures.ThreadPoolExecutor(jobs) as pool:
+        futs = {pool.submit(ask, cmd, t.encode(), o): o for t, o in todo[1:]}
+        for f in concurrent.futures.as_completed(futs):
+            try:
+                done(futs[f], f.result())
+            except Failed as e:
+                failed.append(futs[f])
+                print("failed: %s: %s" % (futs[f], str(e)[:300]), flush=True)
+    if misses:
+        print("cache misses (prompt written again): %s" % ", ".join(sorted(misses)[:20]))
+    print("%d answered, %d failed%s. Total: %s (about $%.3f at API prices)" % (
+        len(todo) - len(failed), len(failed), " (run again for those)" if failed else "", line(total), cost[0]))
+    return 1 if failed else 0
+
+
+def main(prog, argv):
+    model, schema, jobs = "haiku", None, 8
+    while argv[:1] in (["--model"], ["--schema"], ["-j"]) and len(argv) > 1:
+        if argv[0] == "--model":
+            model = argv[1]
+        elif argv[0] == "--schema":
+            schema = argv[1]
+        elif prog == "cc-ask-batch" and argv[1].isdigit() and 1 <= int(argv[1]) <= 16:
+            jobs = int(argv[1])
+        else:
+            sys.exit("%s: -j takes 1 to 16 (cc-ask-batch only)" % prog)
+        argv = argv[2:]
+    batch_mode = prog == "cc-ask-batch"
+    if len(argv) != (2 if batch_mode else 3) or argv[0].startswith("-"):
+        sys.exit(__doc__.strip() if argv[:1] in (["-h"], ["--help"])
+                 else "usage: " + __doc__.splitlines()[1 if batch_mode else 0])
+    prompt, text, out = argv + [None] * (3 - len(argv))
+    claude = shutil.which("claude")
+    if not claude:
+        sys.exit("%s: `claude` not found on PATH" % prog)
+    for f in (prompt,) + ((schema,) if schema else ()):
+        if not os.path.isfile(f):
+            sys.exit("%s: no such file: %s" % (prog, f))
+    if not os.path.isfile(text):
+        sys.exit("%s: no such file: %s" % (prog, text))
+    cmd = [claude, "-p", "--model", model, "--system-prompt-file", prompt, "--tools", "", "--strict-mcp-config",
+           "--setting-sources", "", "--disable-slash-commands", "--no-session-persistence", "--output-format", "json"]
+    if schema:
+        try:
+            with open(schema) as fh:
+                cmd += ["--json-schema", json.dumps(json.load(fh))]
+        except ValueError as e:
+            sys.exit("%s: %s is not JSON: %s" % (prog, schema, e))
+    if batch_mode:
+        return batch(cmd, text, jobs)
+    try:
+        with open(text, "rb") as fh:
+            u, cost = ask(cmd, fh.read(), out)
+    except Failed as e:
+        sys.exit("cc-ask: %s" % e)
+    print("%s: %s (about $%.4f at API prices)" % (out, line(u), cost))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(os.path.basename(sys.argv[0]), sys.argv[1:]))

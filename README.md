@@ -92,6 +92,7 @@ cc-run --cpus 16 --mem 64G -- samtools sort -@ 16 -o out.bam in.bam
 cc-run --gpu --image torch.sif train.py         # in an apptainer image (also docker://...)
 cc-run --array 1-96%20 -- bash per_sample.sh
 cc-wait, cc-jobs, cc-log, cc-cancel, cc-info, cc-usage, cc-cluster, cc-gpu, cc-build, cc-pull
+cc-ask-batch prompt.md tasks.csv                # one model call per row (text, out), no tools, prompt cached
 ```
 Caches (pip, conda, Hugging Face, ...) go to `<project>/.cache/`, new conda environments into the project
 (`conda create -p ./envs/x`). Big transfers run as jobs too.
