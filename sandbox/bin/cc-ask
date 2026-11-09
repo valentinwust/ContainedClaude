@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""cc-ask       [--model MODEL] [--effort LEVEL] [--schema SCHEMA_FILE] PROMPT_FILE TEXT_FILE OUT_FILE
-cc-ask-batch [--model MODEL] [--effort LEVEL] [--schema SCHEMA_FILE] [-j N] PROMPT_FILE TASKS.csv
+"""cc-ask       [--model MODEL] [--effort LEVEL] [--schema SCHEMA_FILE] [--no-cache] PROMPT_FILE TEXT_FILE OUT_FILE
+cc-ask-batch [--model MODEL] [--effort LEVEL] [--schema SCHEMA_FILE] [--no-cache] [-j N] PROMPT_FILE TASKS.csv
 
 One model call per text, without tools: PROMPT_FILE is the system prompt, the text the message, the reply is
 written to a file. Runs `claude -p` on the user's Claude subscription (default model haiku; also sonnet, opus).
@@ -25,6 +25,10 @@ The prompt is read from the cache, and only the text and the reply are new, if:
     cc-ask-batch does both; with cc-ask, run one alone first.
   - From the second call on, "from cache" is about the prompt's size. Prompts under about 500 tokens are not
     cached, but cost little anyway.
+--no-cache: nothing is read from or written to the cache, all input is billed at the plain price. Cheaper
+only for a call with no other one on the same prompt within 5 minutes: a cache write costs 1.25x, and the
+text (with ~600 tokens Claude Code adds) is written each call although never read again. In a batch the
+cache pays from the second row on; with --no-cache all rows run N at a time.
 On haiku a call costs 5x as much once prompt and text together exceed 100k tokens.
 """
 import concurrent.futures
@@ -37,19 +41,21 @@ import sys
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 KEYS = ("cache_read_input_tokens", "cache_creation_input_tokens", "input_tokens", "output_tokens")
+DISABLE = tuple("DISABLE_PROMPT_CACHING" + m for m in ("", "_HAIKU", "_SONNET", "_OPUS", "_FABLE", "_MYTHOS"))
 
 
 class Failed(Exception):
     pass
 
 
-def ask(cmd, text, out):
+def ask(cmd, text, out, cache=True):
     """One call with the message `text` (bytes): the reply into `out` (written whole or not at all).
     Returns (usage, cost in USD)."""
-    env = dict(os.environ, FORCE_PROMPT_CACHING_5M="1")
+    env = dict(os.environ)
     for k in ("CLAUDE_CODE_PLUGIN_DIRS", "ENABLE_PROMPT_CACHING_1H", "CLAUDE_CODE_PROMPT_CACHE_TTL",
-              "CLAUDE_CODE_MESSAGES_PROMPT_CACHE_TTL"):
-        env.pop(k, None)            # no mods (idle compaction etc.), and the 5-minute cache always
+              "CLAUDE_CODE_MESSAGES_PROMPT_CACHE_TTL", "FORCE_PROMPT_CACHING_5M") + DISABLE:
+        env.pop(k, None)            # no mods (idle compaction etc.), and the 5-minute cache or none
+    env["FORCE_PROMPT_CACHING_5M" if cache else "DISABLE_PROMPT_CACHING"] = "1"
     p = subprocess.run(cmd, input=text, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     try:
         d = json.loads(p.stdout)
@@ -92,7 +98,7 @@ def tasks(path):
     return [(r["text"], o) for r, o in zip(rows, outs)]
 
 
-def batch(cmd, path, jobs):
+def batch(cmd, path, jobs, cache):
     rows = tasks(path)
     todo = [(t, o) for t, o in rows if not os.path.exists(o)]
     if not todo:
@@ -100,8 +106,8 @@ def batch(cmd, path, jobs):
         return 0
     for d in {os.path.dirname(o) for _, o in todo} - {""}:
         os.makedirs(d, exist_ok=True)
-    print("cc-ask-batch: %d texts (%d already answered); the first alone, then %d at a time"
-          % (len(todo), len(rows) - len(todo), jobs), flush=True)
+    print("cc-ask-batch: %d texts (%d already answered); %s %d at a time"
+          % (len(todo), len(rows) - len(todo), "the first alone, then" if cache else "no cache,", jobs), flush=True)
     total, cost, failed, misses = dict.fromkeys(KEYS, 0), [0.0], [], []
 
     def done(n, res, first=False):
@@ -109,15 +115,16 @@ def batch(cmd, path, jobs):
         cost[0] += c
         for k in KEYS:
             total[k] += u[k]
-        if not first and u["cache_read_input_tokens"] == 0 and u["cache_creation_input_tokens"] >= 500:
+        if cache and not first and u["cache_read_input_tokens"] == 0 and u["cache_creation_input_tokens"] >= 500:
             misses.append(n)
 
-    try:
-        done(todo[0][1], ask(cmd, todo[0][0].encode(), todo[0][1]), first=True)
-    except Failed as e:
-        sys.exit("cc-ask-batch: %s: %s (stopped before the rest)" % (todo[0][1], e))
+    if cache:                       # the first writes the cache the others read
+        try:
+            done(todo[0][1], ask(cmd, todo[0][0].encode(), todo[0][1]), first=True)
+        except Failed as e:
+            sys.exit("cc-ask-batch: %s: %s (stopped before the rest)" % (todo[0][1], e))
     with concurrent.futures.ThreadPoolExecutor(jobs) as pool:
-        futs = {pool.submit(ask, cmd, t.encode(), o): o for t, o in todo[1:]}
+        futs = {pool.submit(ask, cmd, t.encode(), o, cache): o for t, o in todo[1 if cache else 0:]}
         for f in concurrent.futures.as_completed(futs):
             try:
                 done(futs[f], f.result())
@@ -132,8 +139,12 @@ def batch(cmd, path, jobs):
 
 
 def main(prog, argv):
-    model, effort, schema, jobs = "haiku", None, None, 8
-    while argv[:1] in (["--model"], ["--effort"], ["--schema"], ["-j"]) and len(argv) > 1:
+    model, effort, schema, jobs, cache = "haiku", None, None, 8, True
+    while argv[:1] == ["--no-cache"] or argv[:1] in (["--model"], ["--effort"], ["--schema"], ["-j"]) and len(argv) > 1:
+        if argv[0] == "--no-cache":
+            cache = False
+            argv = argv[1:]
+            continue
         if argv[0] == "--model":
             model = argv[1]
         elif argv[0] == "--effort":
@@ -171,10 +182,10 @@ def main(prog, argv):
         except ValueError as e:
             sys.exit("%s: %s is not JSON: %s" % (prog, schema, e))
     if batch_mode:
-        return batch(cmd, text, jobs)
+        return batch(cmd, text, jobs, cache)
     try:
         with open(text, "rb") as fh:
-            u, cost = ask(cmd, fh.read(), out)
+            u, cost = ask(cmd, fh.read(), out, cache)
     except Failed as e:
         sys.exit("cc-ask: %s" % e)
     print("%s: %s (about $%.4f at API prices)" % (out, line(u), cost))
