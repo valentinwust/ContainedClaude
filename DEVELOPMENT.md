@@ -81,7 +81,8 @@ sandbox/hooks/oom_notice.py    Claude PostToolUse hook for Bash: tells the agent
 sandbox/hooks/peer_guard.py    Claude UserPromptSubmit + PreToolUse SendMessage hook: messages between sessions
                                only within the project; PostToolUse ListAgents: which are reachable (§5.10)
 sandbox/hooks/context_notice.py  Claude PostToolUse hook for every tool: tells an agent once when it nears
-                               auto-compaction (§5.11)
+                               auto-compaction and, past compact_offer, the main session that it may ask
+                               for compaction (§5.11, §5.13)
 lib/containedclaude/host_extras.py  add|remove|status: the extras (install.sh --extras) in the user's own
                                settings.json ($CLAUDE_CONFIG_DIR or ~/.claude): context_notice.py, the
                                idle-compact mod (env CLAUDE_CODE_PLUGIN_DIRS) and site.ini's [claude] values
@@ -90,6 +91,8 @@ lib/containedclaude/host_extras.py  add|remove|status: the extras (install.sh --
 sandbox/mods/idle-compact/     Claude Code mod (hooks module and a UserPromptSubmit hook, loaded through
                                CLAUDE_CODE_PLUGIN_DIRS): notes and compaction before an idle session's prompt
                                cache expires (§5.12)
+sandbox/mods/cc/               Claude Code mod for contained sessions only: agent types cc:worker and
+                               cc:job-worker (agents/), compaction when the main session asks (§5.13)
 templates/                     config.ini, contained_claude.sh (project stub), CLAUDE_environment.md (the
                                sandbox description), CLAUDE_environment_outside.md (the notice on disk)
 site.curry.ini                 committed curry defaults; copied to site.ini by install.sh / init if missing
@@ -197,7 +200,7 @@ memory, history, session records, shell snapshots, Codex rollouts, ...) are boun
    (PreToolUse hook -> write_guard.py, PreToolUse SendMessage + UserPromptSubmit + PostToolUse ListAgents -> peer_guard.py, PostToolUse
    Bash hook -> oom_notice.py, PostToolUse * -> context_notice.py, permissions.deny RemoteTrigger) and `allowedMcpServers: []` plus
    `disableClaudeAiConnectors: true` unless mcp_from_user_config, and an `env` block (project.claude_env: the
-   [claude] values, and with idle_compact the mod's folder in CLAUDE_CODE_PLUGIN_DIRS, after the user's own) (without the second, every session `claude
+   [claude] values, and in CLAUDE_CODE_PLUGIN_DIRS after the user's own the cc mod and with idle_compact the idle-compact mod) (without the second, every session `claude
    remote-control` starts warns about the blocked connectors on stderr, and the server shows that warning in
    place of the session's real error); the user's own entries stay, written only when it changed. bwrap
    binds it read-only over claude-config/settings.json, so every Claude process in the sandbox has these
@@ -605,6 +608,27 @@ settings' env, so it needs no install and reaches server sessions too; edits to 
 next start. In a terminal session it acts before Claude Code's own (50 < 55 min), which then finds a small
 context. Not covered: Codex; a session whose process ends while idle (nothing left to compact).
 
+### 5.13 Worker agent types and compaction on request (sandbox/mods/cc)
+A cost lever, not containment. The cc mod is in every contained session (project.claude_env; not in the host
+extras, its agents name cc-* commands). Measured on two real projects (2026-11-09, ~$390 at API prices):
+subagents are 55-80% of the cost, and a subagent that waits 5-60 min on a job writes its whole context to the
+cache again afterwards (5-minute cache: the subagent default, as subagentPromptCacheTtl is unset).
+- agents/worker.md and agents/job-worker.md (plugin agents cc:worker, cc:job-worker; prompt: Claude's general-purpose
+  agent's, word for word as of 2.1.319, job-worker plus one line on waits): `model: inherit` (the Agent tool's `model` overrides it), `autoCompactWindow: 213000`
+  (compaction ~33k below: ~180k; in a replay of the logs a fixed 180k paid most for subagents, 250k nothing).
+  job-worker has `experimental: {cacheTtl: 1h}`: the 1-hour cache, whose writes cost 2x input instead of 1.25x,
+  so it pays only for tasks that wait; the descriptions say when to pick which. Precedence (2.1.319): env
+  CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL > setting subagentPromptCacheTtl > the frontmatter (ignored in overage),
+  so setting either would override it. A mod can't compact a subagent ($.session.compact is the main
+  conversation's), so the fixed window is all subagents get.
+- Compaction on request (main session): past compact_offer tokens (180000) and before the auto-compaction
+  notice is due, context_notice.py tells the main session once (again after a drop below) that it may end a
+  reply with a last line `[[compact]] <what to keep>`. hooks/register.ts sees that line on the main loop's
+  `turn.complete` (reason answer), runs `/compact` with the rest of the line plus fixed instructions, then
+  `$.prompt.submit`s a one-line prompt to continue (visible, like idle-compact's). Below 2/3 of compact_offer it
+  doesn't compact and says so in that prompt. 180k: in the replay, compacting at 150-200k paid off 75% of the
+  time (break-even 18 requests), at 100-150k 56% (34); "half the window" would be 100k or 500k.
+
 ---------------------------------------------------------------------------------------------------------------
 ## 6. Version dependencies (what can break when tools update) and where to fix
 
@@ -619,6 +643,7 @@ context. Not covered: Codex; a session whose process ends while idle (nothing le
 | Codex CLI (0.166.0) | its own sandbox = a bwrap + seccomp inner layer; needs /tmp to be a real mount (mount root "/") and, for sockets, `[sandbox_workspace_write] network_access = true` in CODEX_HOME/config.toml (seeded by ensure_state); `[features] daemon_auto_start = false` (seeded: otherwise the TUI copies its binary into packages/ and runs a background server); folder trust `[projects."<path>"] trust_level` (written by codex_trust; Codex can't write config.toml in sessions) | `containedclaude test` runs a command under `codex sandbox` (writes the project, reaches the broker); failure shows there and as "bwrap: Can't mkdir parents ..." or "broker not reachable (Operation not permitted)" in Codex output |
 | Claude Code context and compaction (2.1.319) | context_notice.py: PostToolUse input session_id, transcript_path, agent_id/agent_type (subagents only), tool_response, tool_use_id; user records' message.content (tool_result items with tool_use_id), attachment records; transcript records type assistant + message.usage (input + cache_creation_input + cache_read_input tokens) and message.model; subagent transcripts in <session>/subagents/agent-<id>.jsonl; autoCompactWindow in modelSettings / agent frontmatter / CLAUDE_CODE_AUTO_COMPACT_WINDOW; a fixed 33k buffer below the window | the notice comes late, early or never; test's check uses sample transcripts and can't see that, the occasional manual check in §8 does. `/context` (`claude -p /context`, no model call) shows the current buffer |
 | Claude Code mods (2.1.319) | idle-compact: CLAUDE_CODE_PLUGIN_DIRS read from the settings' env block (inline plugin, hooks module); `turn.start` / `turn.complete` (agentId absent on the main loop, reason), `$.session.usage().context.tokens`, `$.clock.after`, `$.prompt.submit` (works in an idle SDK session; the plugin's UserPromptSubmit command hook sees it, its own `prompt.submit` hooks don't), `$.command.run({ command: "compact", args })` (works in SDK sessions, where `$.session.compact()` refuses), `$.env.get`; Claude Code's own idle compaction still skipping SDK sessions | no notice or no compaction in idle sessions; if Claude Code starts idle-compacting SDK sessions itself, the mod still acts first (50 min) and can stay or go. `claude plugin validate sandbox/mods/idle-compact` and the manual check in §8 |
+| Claude Code agent types and compaction on request (2.1.319) | cc mod: plugin agents/*.md with name, description, model inherit, autoCompactWindow, experimental.cacheTtl (kept for plugin agents, which drop permissionMode/hooks/mcpServers); usage.cache_creation.ephemeral_1h/5m_input_tokens in subagent transcripts; their prompt is a copy of the general-purpose agent's (function returning "You are an agent for Claude Code..." in the binary); `turn.complete`'s result `text` (the answer), `$.command.run` compact, `$.prompt.submit` | the types are missing from the Agent tool, a job-worker writes 5-minute cache (ephemeral_5m), or a `[[compact]]` reply isn't compacted; the manual check in §8. After a Claude Code update compare the general-purpose prompt with the agent files' text |
 | util-linux unshare (2.37.4), jobs | --user --map-current-user --mount --propagation private | compat.outer_unshare: falls back to --map-user=UID --map-group=GID (never -r: that maps to root) |
 | apptainer 1.5.5 | exec --userns --containall --workdir --home --pwd --nv --bind --env; build --fakeroot; pull | jobwrap: --userns/--containall/--workdir only if `apptainer exec --help` lists them (compat.likely: if --help is unreadable, pass everything as before); APPTAINER_USERNS=1 forces userns anyway. Security does not depend on these: the surrounding bwrap sandbox decides ro/rw |
 | Claude Code (2.1.319) | CLAUDE_CONFIG_DIR/settings.json read by every Claude process (user settings), also by the sessions `claude remote-control` starts (they inherit env and mounts, not flags; the server refuses to start behind --mcp-config/--strict-mcp-config); `allowedMcpServers: []` there hides every MCP server incl. claude.ai connectors, `disableClaudeAiConnectors: true` keeps the connectors from loading (else each session the server starts warns about them on stderr); the managed-settings folder is fixed at /etc/claude-code (no override in the public build); --settings (admin only), --strict-mcp-config, --mcp-config (not for the server; passed only if `claude --help` lists them, else warns), DISABLE_AUTOUPDATER, hook JSON (tool_name, tool_input.file_path/notebook_path, exit 2 = block + stderr), @import in CLAUDE.md | check `claude --help`; config dir layout names in policy.CLAUDE_CONFIG_RO (missing names are skipped) |
@@ -760,6 +785,17 @@ notice itself as hook_additional_context (UserPromptSubmit), the agent's notes, 
 Claude Code's own idle compaction never fired in SDK sessions (13 idle gaps over 56 min above 200k in a real
 project; none in a test session), and the CLAUDE_CODE_IDLE_* variables changed nothing there.
 
+Occasional manual check of the cc mod (2026-11-09, 2.1.319, Haiku 5.5), in a scratch folder with
+`--plugin-dir sandbox/mods/cc`: (1) `claude -p --model haiku` asked to spawn cc:job-worker and cc:worker with
+model haiku: each subagent transcript's first usage has cache_creation ephemeral_1h_input_tokens (job-worker)
+resp. ephemeral_5m_input_tokens (worker). (2) CONTAINEDCLAUDE_COMPACT_OFFER=3000 and a headless SDK session
+(stream-json, stdin kept open) told "Remember the code word X. Reply OK, end with a last line exactly:
+[[compact]] keep the code word": after the answer a compaction (trigger manual), then the continue prompt, and
+the agent's next answer still has the code word. Repeated inside a throwaway project (`containedclaude shell P --
+claude ...`, compact_offer = 3000 in its config.ini): workers spawned from a Haiku session with `model: sonnet`
+ran on Sonnet with the right cache tiers, the marker compacted; with compact_offer = 900000 (a 25k context is
+below 2/3 of it) the agent got the "Not compacted" prompt instead.
+
 ---------------------------------------------------------------------------------------------------------------
 ## 9. How to change common things
 
@@ -776,6 +812,8 @@ project; none in a test session), and the CLAUDE_CODE_IDLE_* variables changed n
 - Compaction notice: sandbox/hooks/context_notice.py (BUFFER, MARGIN; formats in §6).
 - Compaction before the cache expires: sandbox/mods/idle-compact/hooks/register.ts (§5.12); values in
   config.DEFAULTS["claude"], passed by project.claude_env.
+- Worker agent types, compaction on request: sandbox/mods/cc (§5.13); the offer's text is OFFER in
+  context_notice.py, its marker MARK in the mod's register.ts.
 - Launcher settings for Claude (hooks, denials, MCP rule): project.claude_settings / session_settings; they
   reach sessions through the bound settings.json (§3, 4), admin through --settings; functest's "the
   launcher's settings reach every Claude process" checks them.

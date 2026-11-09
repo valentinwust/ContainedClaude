@@ -330,14 +330,20 @@ def session_checks(td):
         env = st.get("env") or {}
         assert env.get("CONTAINEDCLAUDE_COMPACT_NOTICE") == (cfg.get("claude", "compact_notice") or "0"), \
             "compact_notice not passed: %r" % env
+        assert env.get("CONTAINEDCLAUDE_COMPACT_OFFER") == (cfg.get("claude", "compact_offer") or "0"), \
+            "compact_offer not passed: %r" % env
         mod = os.path.join(CLONE, "sandbox", "mods", "idle-compact")
+        cc = os.path.join(CLONE, "sandbox", "mods", "cc")
         dirs = (env.get("CLAUDE_CODE_PLUGIN_DIRS") or "").split(os.pathsep)
         assert (mod in dirs) == cfg.bool("claude", "idle_compact"), "idle-compact mod: %r" % env
-        assert os.path.isfile(os.path.join(mod, "hooks", "register.ts")), "the idle-compact mod is missing"
+        assert cc in dirs, "cc mod not loaded: %r" % env
+        for f in ((mod, "hooks", "register.ts"), (cc, "hooks", "register.ts"), (cc, "agents", "worker.md"),
+                  (cc, "agents", "job-worker.md")):
+            assert os.path.isfile(os.path.join(*f)), "missing: %s" % os.path.join(*f)
         own = project.session_settings(cfg, {"env": {"CLAUDE_CODE_PLUGIN_DIRS": "/x", "K": "v"}})["env"]
         assert own["K"] == "v" and own["CLAUDE_CODE_PLUGIN_DIRS"].split(os.pathsep)[0] == "/x", \
             "the user's own env entries were not kept: %r" % own
-        return "hooks, RemoteTrigger denied, %s, [claude] values%s; the user's own settings kept" % (
+        return "hooks, RemoteTrigger denied, %s, [claude] values, cc mod%s; the user's own settings kept" % (
             "no MCP servers" if no_mcp else "MCP servers from the config",
             ", idle-compact mod" if mod in dirs else "")
     check("the launcher's settings reach every Claude process", launcher_settings if cfgdir else lambda: False)
@@ -476,6 +482,7 @@ def session_checks(td):
             env = dict(os.environ, CLAUDE_CONFIG_DIR=d, CLAUDE_PROJECT_DIR=d)
             env.pop("CLAUDE_CODE_AUTO_COMPACT_WINDOW", None)
             env.pop("CONTAINEDCLAUDE_COMPACT_NOTICE", None)          # the default margin, 25k
+            env.pop("CONTAINEDCLAUDE_COMPACT_OFFER", None)           # off until the second part
             hook = os.path.join(CLONE, "sandbox", "hooks", "context_notice.py")
             def said(agent=None, result="", tool_id="t-own"):
                 payload = {"hook_event_name": "PostToolUse", "tool_name": "Read", "session_id": sid,
@@ -511,11 +518,27 @@ def session_checks(td):
                                          not in got):
                     wrong.append("step %d: %r" % (i + 1, got[:60] or "silent"))
             assert not wrong, "; ".join(wrong)
+            # compact_offer 180k on a 1M window: the main session hears once that it may ask for compaction,
+            # subagents never; the notice before auto-compaction still comes (offer None = that notice)
+            env["CONTAINEDCLAUDE_COMPACT_OFFER"] = "180000"
+            with open(os.path.join(d, "settings.json"), "w") as fh:
+                json.dump({"modelSettings": {"m-huge": {"autoCompactWindow": 1000000}}}, fh)
+            offers = [(main_t, 170000, None, False), (main_t, 185000, None, True), (main_t, 190000, None, False),
+                      (sub_t, 190000, "a1", False), (main_t, 60000, None, False), (main_t, 185000, None, True),
+                      (main_t, 950000, None, None)]
+            for i, (path, tokens, agent, want) in enumerate(offers):
+                usage(path, tokens, "m-huge")
+                got = said(agent)
+                if (want is None and "auto-compaction starts" not in got) or \
+                        (want is not None and ("[[compact]]" in got) != want or want is False and got):
+                    wrong.append("offer step %d: %r" % (i + 1, got[:60] or "silent"))
+            assert not wrong, "; ".join(wrong)
         finally:
             shutil.rmtree(d, ignore_errors=True)
             for f in glob.glob("/tmp/.containedclaude-context-%d/%s.*" % (os.getuid(), sid)):
                 os.unlink(f)
-        return "warns once 25k before compaction, again after a drop (%d steps)" % len(steps)
+        return "warns once 25k before compaction, again after a drop; offers compaction to the main session " \
+               "(%d steps)" % (len(steps) + len(offers))
     check("notice close to auto-compaction (context_notice)", context_notice)
     def idle_notice():
         # the idle-compact mod's line (register.ts) gets the hidden notice from its UserPromptSubmit hook

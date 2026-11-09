@@ -9,6 +9,9 @@ into the next request: tool results of parallel calls and attachments already wr
 window, first match wins: CLAUDE_CODE_AUTO_COMPACT_WINDOW, the
 subagent definition's autoCompactWindow, modelSettings.<model>.autoCompactWindow in the settings files (local >
 project > user), else 200k (Claude Code's own fallback), or 1M once usage is past 200k.
+
+With CONTAINEDCLAUDE_COMPACT_OFFER (contained sessions), the main session also hears once, past that many tokens
+and before the notice above is due, that it may ask for compaction (the cc mod acts on it).
 """
 import glob
 import json
@@ -176,7 +179,11 @@ def main():
         margin = int(os.environ.get("CONTAINEDCLAUDE_COMPACT_NOTICE", MARGIN))
     except ValueError:
         margin = MARGIN
-    if margin <= 0:
+    try:                     # [claude] compact_offer (contained sessions only); unset or 0 = off
+        offer = 0 if agent else int(os.environ.get("CONTAINEDCLAUDE_COMPACT_OFFER") or 0)
+    except ValueError:
+        offer = 0
+    if margin <= 0 and offer <= 0:
         return 0
     project = os.environ.get("CLAUDE_PROJECT_DIR") or data.get("cwd") or os.getcwd()
     w = window(model, tokens, data.get("agent_type") if agent else None, project)
@@ -185,25 +192,46 @@ def main():
         return 0
     flag = os.path.join(d, "".join(c if c.isalnum() or c in "-_" else "_" for c in session + "." + (agent or "main")))
     trigger = w - BUFFER
-    if tokens < trigger - margin:
+    near = margin > 0 and tokens >= trigger - margin
+    if once(flag, near):
+        msg = NEAR % (tokens // 1000, max(trigger, 0) // 1000)
+    elif once(flag + ".offer", offer > 0 and tokens >= offer and not near):
+        msg = OFFER % (tokens // 1000)
+    else:
+        return 0
+    json.dump({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": msg}}, sys.stdout)
+    return 0
+
+
+NEAR = ("containedclaude: your context holds about %dk tokens and auto-compaction starts at about %dk, so it will "
+        "summarize this conversation soon and details that live only in the conversation may be lost. Consider "
+        "writing down what matters (state, decisions, paths, open work) where you or the user will find it; then "
+        "continue as you judge best.")
+# the line starting with [[compact]] is MARK in sandbox/mods/cc/hooks/register.ts
+OFFER = ("containedclaude: your context holds about %dk tokens. If much of it is no longer needed (images and logs "
+         "already read, finished subtasks) and a good part of the work remains (more than about 20 tool calls), "
+         "you can have it compacted: write down what matters, then end your reply with a last line "
+         "`[[compact]] <what the summary must keep>`. The conversation is compacted when your turn ends, and you "
+         "are prompted to continue. Otherwise carry on; this notice comes once.")
+
+
+def once(flag, due):
+    """True the first time `due` holds since it last didn't (the flag file remembers); False if the flag can't
+    be made, as the notice would otherwise repeat at every call."""
+    if not due:
         if os.path.exists(flag):
             try:
                 os.unlink(flag)
             except OSError:
                 pass
-        return 0
+        return False
     if os.path.exists(flag):
-        return 0
+        return False
     try:
         os.close(os.open(flag, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600))
     except OSError:
-        return 0                                     # without the flag it would repeat at every call
-    msg = ("containedclaude: your context holds about %dk tokens and auto-compaction starts at about %dk, so it "
-           "will summarize this conversation soon and details that live only in the conversation may be lost. "
-           "Consider writing down what matters (state, decisions, paths, open work) where you or the user will find "
-           "it; then continue as you judge best." % (tokens // 1000, max(trigger, 0) // 1000))
-    json.dump({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": msg}}, sys.stdout)
-    return 0
+        return False
+    return True
 
 
 if __name__ == "__main__":

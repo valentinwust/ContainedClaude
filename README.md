@@ -130,7 +130,14 @@ job.
   session idle for `idle_compact_after` minutes (50) with at least `idle_compact_min_tokens` (200000) is asked
   for notes and compacted right after its answer, before the 1-hour prompt cache expires and your next message
   would send the whole context again at full price. Claude Code does that itself only in a terminal; this
-  covers Remote Control sessions too.
+  covers Remote Control sessions too. Past `compact_offer` tokens (180000; 0 = never) the main session is told
+  once that it may ask for compaction when much of its context is no longer needed: a reply ending in a line
+  `[[compact]] <what to keep>` compacts it once the turn ends, and it is prompted to continue.
+
+Contained sessions can also spawn two worker agent types besides Claude's own: `cc:worker` (5-minute prompt
+cache, for steady work) and `cc:job-worker` (1-hour cache, for tasks that wait on jobs, so a wait doesn't send
+the whole context again). Both compact at about 180k tokens; the spawning agent picks the type and, with the
+Agent tool's `model`, Sonnet or Opus.
 
 Model, effort and auto-compaction window are Claude's and Codex's own settings, in the contained config shared
 by all projects (change them with `containedclaude admin` / `admin codex`, or edit the files):

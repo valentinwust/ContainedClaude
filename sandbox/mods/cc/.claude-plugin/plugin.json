@@ -1,0 +1,1 @@
+{ "name": "cc", "version": "1.0.0", "description": "ContainedClaude: worker agent types (cc:worker, cc:job-worker) and compaction when the main session asks for it" }
