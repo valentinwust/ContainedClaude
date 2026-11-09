@@ -84,7 +84,7 @@ memory and prompt history stay with the project (`.contained/state/`). Settings,
 read-only in projects; change them with `containedclaude admin`, a Claude session (still sandboxed) with that
 config writable.
 
-## Jobs and tools
+## Jobs
 Agents learn the rules from `CLAUDE_environment.md` and run cluster work as jobs:
 ```bash
 cc-run analysis.ipynb                           # a notebook as a job
@@ -92,7 +92,6 @@ cc-run --cpus 16 --mem 64G -- samtools sort -@ 16 -o out.bam in.bam
 cc-run --gpu --image torch.sif train.py         # in an apptainer image (also docker://...)
 cc-run --array 1-96%20 -- bash per_sample.sh
 cc-wait, cc-jobs, cc-log, cc-cancel, cc-info, cc-usage, cc-cluster, cc-gpu, cc-build, cc-pull
-cc-ask-batch prompt.md tasks.csv                # one model call per row (text, out), no tools, prompt cached
 ```
 Caches (pip, conda, Hugging Face, ...) go to `<project>/.cache/`, new conda environments into the project
 (`conda create -p ./envs/x`). Big transfers run as jobs too.
@@ -120,6 +119,17 @@ containedclaude admin          # the plugin for Claude: /plugin marketplace add 
 For long jobs, `background_terminal_max_timeout = 7200000` above the first `[section]` of
 `~/.local/share/containedclaude/codex-home/config.toml` lets Codex wait on a command for 2 h instead of 5 min.
 
+## Other features
+- **Worker agent types**: besides Claude's own, contained sessions can spawn `cc:worker` (5-minute prompt
+  cache, for steady work) and `cc:job-worker` (1-hour cache, for tasks that wait on jobs, so a wait doesn't
+  send the whole context again). Both compact at about 180k tokens; the spawning agent picks the type and, with
+  the Agent tool's `model`, Sonnet or Opus.
+- **The same instructions for many texts** (summarise, classify, extract): `cc-ask-batch prompt.md tasks.csv`
+  makes one model call per row (columns `text`, `out`: the reply's file), without tools and on your
+  subscription, with the shared prompt read from the prompt cache. `--model` (haiku by default), `--schema`
+  (the reply as JSON in that shape), `-j` (8 at a time); `cc-ask prompt.md text.txt reply.md` for one text,
+  `cc-ask --help` for how to keep the cache hits.
+
 ## Configure
 The project's `.contained/config.ini` (read-only for the agent) lists every setting with a comment. It
 overrides `site.ini` in the clone, which overrides the built-in defaults; changes apply to the next session or
@@ -134,11 +144,6 @@ job.
   covers Remote Control sessions too. Past `compact_offer` tokens (180000; 0 = never) the main session is told
   once that it may ask for compaction when much of its context is no longer needed: a reply ending in a line
   `[[compact]] <what to keep>` compacts it once the turn ends, and it is prompted to continue.
-
-Contained sessions can also spawn two worker agent types besides Claude's own: `cc:worker` (5-minute prompt
-cache, for steady work) and `cc:job-worker` (1-hour cache, for tasks that wait on jobs, so a wait doesn't send
-the whole context again). Both compact at about 180k tokens; the spawning agent picks the type and, with the
-Agent tool's `model`, Sonnet or Opus.
 
 Model, effort and auto-compaction window are Claude's and Codex's own settings, in the contained config shared
 by all projects (change them with `containedclaude admin` / `admin codex`, or edit the files):

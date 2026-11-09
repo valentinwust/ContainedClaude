@@ -55,9 +55,6 @@ cc-usage [JOBID ...]                            # what jobs used: peak memory, C
 cc-build containers/x/x.def [x.sif]             # build an image as a job (fakeroot; glibc base images only)
 cc-pull docker://... out.sif                    # pull an image as a job (both also write x.sif.sha256)
 ```
-Many texts with the same instructions (summarise, classify, extract): `cc-ask-batch [--model haiku|sonnet|opus]
-[--schema S.json] PROMPT_FILE TASKS.csv` (columns text, out), one model call per text without tools, the shared
-prompt read from the cache; one text: `cc-ask PROMPT_FILE TEXT_FILE OUT_FILE` (`cc-ask --help`).
 Waiting (`cc-wait`, `cc-run --wait`, `cc-log -f`) blocks your turn, so the user can't reach you meanwhile: in
 Claude Code, start it with Bash `run_in_background`; you're notified when it ends.
 Options: `--cpus N --mem 16G --time HH:MM:SS --gpu --name NAME --image IMG|none --env K=V --cwd DIR`
@@ -76,6 +73,12 @@ plus apptainer; Snakemake/Nextflow work with their local executor, not their Slu
 these folders are visible (read-only unless writable above):
 {{image_binds}}
 Image cache: `{{apptainer_cache}}`.
+
+## Other tools
+- **The same instructions for many texts** (summarise, classify, extract): `cc-ask-batch [--model
+  haiku|sonnet|opus] [--schema S.json] PROMPT_FILE TASKS.csv` (columns `text`, `out`), one model call per row
+  without tools, the shared prompt read from the cache; one text: `cc-ask PROMPT_FILE TEXT_FILE OUT_FILE`
+  (`cc-ask --help`).
 
 ## When something is blocked: tell the user the fix (they do it outside the sandbox)
 - **Need to write somewhere else** (a results or data folder): `containedclaude add-write {{project}} FOLDER`
