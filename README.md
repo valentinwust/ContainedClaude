@@ -121,8 +121,8 @@ For long jobs, `background_terminal_max_timeout = 7200000` above the first `[sec
 
 ## Other features
 - **Worker agent types**: besides Claude's own, contained sessions can spawn `cc:worker` (5-minute prompt
-  cache, for steady work) and `cc:job-worker` (1-hour cache, for tasks that wait on jobs, so a wait doesn't
-  send the whole context again). Both compact at about 180k tokens; the spawning agent picks the type and, with
+  cache, for steady work; it waits at most a few minutes and is told to hand longer waits back) and
+  `cc:job-worker` (1-hour cache, for tasks that wait on jobs, so a wait doesn't send the whole context again). Both compact at about 180k tokens; the spawning agent picks the type and, with
   the Agent tool's `model`, Sonnet or Opus.
 - **Waits on jobs**: in contained Claude sessions, a `cc-wait` (also `cc-run --wait`, `cc-log -f`) in the
   foreground returns after at most 55 minutes with "still running", instead of being moved to the

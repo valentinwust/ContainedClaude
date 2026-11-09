@@ -853,7 +853,14 @@ below 2/3 of it) the agent got the "Not compacted" prompt instead. (3) In a thro
 `cc-run -- sleep 150` and then a plain `cc-wait JOBID` (no timeout, not in the background), in the main loop and
 in a cc:worker: both waits ended "all done after 2.5 min" in the foreground, the worker reported once. Directly,
 `CONTAINEDCLAUDE_WAIT_LIMIT=0.5 cc-wait JOB` returned after 30 s with exit 2 and the line to go on; cc-log -f
-stopped likewise.
+stopped likewise. (4) With the final values (2026-11-09, d67bfb2): a plain foreground `cc-wait` on a
+`sleep 690` job in the main loop and in a cc:job-worker each returned "all done after 11.5 min" in one Bash
+call (BASH_MAX_TIMEOUT_MS reaches the sessions). A cc:worker: a 60 s job finished inside its wait without a
+note; on a `sleep 400` job its wait returned "still running after 3 min:" without the go-on hint, with the
+note; a 300 s command given timeout 600000 moved to the background at 240 s, with the note. A cc:job-worker
+that ran cc-wait with run_in_background got its note and waited again in the foreground. In a stream-json
+session (`--input-format stream-json`), a message sent 2 min into a foreground cc-wait was seen only after the
+wait ended (7 min). A worker told to keep going anyway treats the note as tool advice, not as the user's.
 
 Occasional manual check of cc-ask (2026-11-09, 2.1.319, Haiku 5.5): in a throwaway project, a ~14k-token
 prompt file new to the cache and a tasks.csv of 12 rows (texts with quotes, commas, line breaks; outs in two
