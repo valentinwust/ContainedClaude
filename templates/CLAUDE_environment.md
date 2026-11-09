@@ -55,8 +55,8 @@ cc-usage [JOBID ...]                            # what jobs used: peak memory, C
 cc-build containers/x/x.def [x.sif]             # build an image as a job (fakeroot; glibc base images only)
 cc-pull docker://... out.sif                    # pull an image as a job (both also write x.sif.sha256)
 ```
-Waiting (`cc-wait`, `cc-run --wait`, `cc-log -f`) blocks your turn, so the user can't reach you meanwhile: in
-Claude Code, start it with Bash `run_in_background`; you're notified when it ends.
+Waiting (`cc-wait`, `cc-run --wait`, `cc-log -f`) in the foreground returns after at most 55 minutes with
+"still running": run it again to go on.
 Options: `--cpus N --mem 16G --time HH:MM:SS --gpu --name NAME --image IMG|none --env K=V --cwd DIR`
 (`--env` can't set `PATH`, `LD_*`, `APPTAINER_*`, `SLURM_*`: set those in the job's script).
 Defaults: {{cpus}} CPUs, {{mem}}, {{time}}, image `{{default_image}}`, partition {{partition}}.

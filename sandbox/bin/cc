@@ -26,6 +26,11 @@ import sys
 import time
 
 SOCK = os.environ.get("CONTAINEDCLAUDE_SOCKET", "/tmp/.containedclaude/broker.sock")
+# Set by the cc mod on waits Claude runs in the foreground (DEVELOPMENT.md §5.13): stop before Bash's limit (57
+# minutes in contained sessions, 4 for cc:worker), which would move the wait to the background mid-run.
+# HANDBACK (cc:worker): no hint to wait again, the mod's note says to hand the wait back.
+CALL_LIMIT = float(os.environ.get("CONTAINEDCLAUDE_WAIT_LIMIT") or 0)
+HANDBACK = bool(os.environ.get("CONTAINEDCLAUDE_WAIT_HANDBACK"))
 
 
 def call(payload, timeout=300):
@@ -145,13 +150,17 @@ def no_log(jobid):
 
 def wait(ids, max_min, interval):
     ids = [str(i).split("_")[0] for i in ids]
+    capped = CALL_LIMIT and not 0 < max_min <= CALL_LIMIT
+    if capped:
+        max_min, interval = CALL_LIMIT, min(interval, 30)
     start = time.time()
     while True:
         active = [r for r in call({"action": "queue"})["rows"] if r["array_id"] in ids or r["id"] in ids]
         if not active:
             break
         if max_min and time.time() - start > max_min * 60:
-            print("still running after %g min:" % max_min)
+            print("still running after %g min%s:" % (max_min, " (the most one Bash call waits; to go on waiting: "
+                                                     "cc-wait %s)" % " ".join(ids) if capped and not HANDBACK else ""))
             for r in active:
                 print("  %-14s %-24s %-10s %s" % (r["id"], r["name"], r["state"], r["elapsed"]))
             return 2
@@ -275,9 +284,13 @@ def main():
             print("=== " + f)
             print(tail(f, a.n))
         if a.f:
+            start = time.time()
             with open(files[0]) as fh:
                 fh.seek(0, 2)
                 while True:
+                    if CALL_LIMIT and time.time() - start > CALL_LIMIT * 60:
+                        print("(stopped following after %g min, the most one Bash call waits)" % CALL_LIMIT)
+                        return 2
                     line = fh.readline()
                     if line:
                         sys.stdout.write(line)

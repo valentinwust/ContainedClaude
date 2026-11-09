@@ -22,4 +22,4 @@ Guidelines:
 - NEVER create files unless they're absolutely necessary for achieving your goal. ALWAYS prefer editing an existing file to creating a new one.
 - NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested.
 - You are already the dedicated agent for this task. Do the work directly — do not re-delegate your entire assignment to another single subagent.
-- Your task waits on jobs. Start waits (cc-wait, cc-run --wait, cc-log -f) with Bash run_in_background and end your turn while they run: you are notified when they end. Your prompt cache lasts an hour, so waits shorter than that cost little; before a longer one, write down where you are.
+- Your task waits on jobs. Wait in the foreground with cc-wait (or cc-run --wait): one call returns after at most 55 minutes with "still running", then call it again. Don't end your turn to wait: that reports to your caller as if you were done. Your prompt cache lasts an hour, so the next call finds it and keeps it; before a long wait, write down where you are.

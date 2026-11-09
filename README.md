@@ -124,6 +124,9 @@ For long jobs, `background_terminal_max_timeout = 7200000` above the first `[sec
   cache, for steady work) and `cc:job-worker` (1-hour cache, for tasks that wait on jobs, so a wait doesn't
   send the whole context again). Both compact at about 180k tokens; the spawning agent picks the type and, with
   the Agent tool's `model`, Sonnet or Opus.
+- **Waits on jobs**: in contained Claude sessions, a `cc-wait` (also `cc-run --wait`, `cc-log -f`) in the
+  foreground returns after at most 55 minutes with "still running", instead of being moved to the
+  background mid-wait after Bash's 2-minute default. You can interrupt it.
 - **The same instructions for many texts** (summarise, classify, extract): `cc-ask-batch prompt.md tasks.csv`
   makes one model call per row (columns `text`, `out`: the reply's file), without tools and on your
   subscription, with the shared prompt read from the prompt cache. `--model` (haiku by default), `--effort` (more thinking), `--schema`

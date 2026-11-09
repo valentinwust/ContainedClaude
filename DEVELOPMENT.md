@@ -96,7 +96,8 @@ sandbox/mods/idle-compact/     Claude Code mod (hooks module and a UserPromptSub
                                CLAUDE_CODE_PLUGIN_DIRS): notes and compaction before an idle session's prompt
                                cache expires (§5.12)
 sandbox/mods/cc/               Claude Code mod for contained sessions only: agent types cc:worker and
-                               cc:job-worker (agents/), compaction when the main session asks (§5.13)
+                               cc:job-worker (agents/), compaction when the main session asks, waits on
+                               jobs that end before Bash's limit (§5.13)
 templates/                     config.ini, contained_claude.sh (project stub), CLAUDE_environment.md (the
                                sandbox description), CLAUDE_environment_outside.md (the notice on disk)
 site.curry.ini                 committed curry defaults; copied to site.ini by install.sh / init if missing
@@ -612,7 +613,7 @@ settings' env, so it needs no install and reaches server sessions too; edits to 
 next start. In a terminal session it acts before Claude Code's own (50 < 55 min), which then finds a small
 context. Not covered: Codex; a session whose process ends while idle (nothing left to compact).
 
-### 5.13 Worker agent types and compaction on request (sandbox/mods/cc)
+### 5.13 Worker agent types, compaction on request, waits on jobs (sandbox/mods/cc)
 A cost lever, not containment. The cc mod is in every contained session (project.claude_env; not in the host
 extras, its agents name cc-* commands). Measured on two real projects (2026-11-09, ~$390 at API prices):
 subagents are 55-80% of the cost, and a subagent that waits 5-60 min on a job writes its whole context to the
@@ -632,6 +633,33 @@ cache again afterwards (5-minute cache: the subagent default, as subagentPromptC
   `$.prompt.submit`s a one-line prompt to continue (visible, like idle-compact's). Below 2/3 of compact_offer it
   doesn't compact and says so in that prompt. 180k: in the replay, compacting at 150-200k paid off 75% of the
   time (break-even 18 requests), at 100-150k 56% (34); "half the window" would be 100k or 500k.
+- Waits on jobs: a `tool.call` hook on Bash gives a command that runs cc-wait, `cc-run --wait` or `cc-log -f`
+  (the WAIT pattern; a `--wait` after cc-run's `--` matches too, harmless) a 57-minute timeout and prefixes
+  `export CONTAINEDCLAUDE_WAIT_LIMIT=55;`, unless the agent runs it in the background. project.claude_env sets
+  BASH_MAX_TIMEOUT_MS=3420000 (else Bash clamps any timeout to 10 min): also the most any command may set, so
+  no foreground command outlasts the 1-hour cache. Other commands keep the 2-minute default. With that
+  variable sandbox/bin/cc stops waiting after 55 min (a larger or no `--max`; checks every 30 s at most) and
+  says how to go on, cc-log -f stops following. 55 min: the next request still finds the 1-hour cache (main
+  session, cc:job-worker) and renews it at the cache-read price; 10-minute calls cost 6 reads an hour, one
+  call over 60 min a full 1-hour-cache write. Without the hook, Bash's default 2-minute timeout (agents write
+  `cc-wait --max 25` and no timeout) moved the wait to the background mid-run: 41 of ~430 waits in two
+  projects' transcripts (2026-11), after which the agent slept, polled cc-jobs or waited again. Forcing waits
+  into the background instead (tried) makes a subagent end its turn, which reports to the parent as if done;
+  the parent may then start the same wait. In a stream-json session (as Remote Control runs them) a user
+  message waits until the foreground command ends (tested: seen after a 7-minute cc-wait); the user can
+  interrupt. Not covered: a wait inside a script the agent runs (2-minute default).
+  A subagent other than cc:worker that puts a wait in the background gets a note in the result (`context`):
+  ending its turn to wait reports to its caller as if done; wait in the foreground. The main session's
+  background waits stay as they are (no caller; a wait over an hour costs one 1-hour-cache write on resume).
+- cc:worker (5-minute cache; its type from `$.agent.list()` by the call's agentId): any Bash timeout above 4
+  min is lowered to 4 (moved to the background then, not killed); its foreground waits get a 4-minute timeout
+  and CONTAINEDCLAUDE_WAIT_LIMIT=3 (ends by 3.5; Claude Code itself moves a background subagent's foreground
+  command to the background after 3 min unless it has the 1-hour cache) and CONTAINEDCLAUDE_WAIT_HANDBACK (no
+  "to go on waiting" hint), so a short job can still be waited on. When a wait stops there, a command is
+  moved to the background on timeout (Bash result timedOutAfterMs), or it puts a wait in the background, the
+  hook adds a note to the result (`context`): not the worker for long waits, hand back the job IDs and ask
+  for a cc:job-worker, or find a faster way. Refusing such commands (tried) blocked waits on 2-minute jobs.
+  Not covered: waiting with the Monitor tool (no Bash call).
 
 ### 5.14 One-shot model calls (sandbox/bin/cc-ask)
 A cost lever, not containment: for many independent texts with the same instructions, a fresh `claude -p` per
@@ -670,7 +698,7 @@ reply, and --max-budget-usd checks after the request: paid for, reply discarded 
 | Claude Code context and compaction (2.1.319) | context_notice.py: PostToolUse input session_id, transcript_path, agent_id/agent_type (subagents only), tool_response, tool_use_id; user records' message.content (tool_result items with tool_use_id), attachment records; transcript records type assistant + message.usage (input + cache_creation_input + cache_read_input tokens) and message.model; subagent transcripts in <session>/subagents/agent-<id>.jsonl; autoCompactWindow in modelSettings / agent frontmatter / CLAUDE_CODE_AUTO_COMPACT_WINDOW; a fixed 33k buffer below the window | the notice comes late, early or never; test's check uses sample transcripts and can't see that, the occasional manual check in §8 does. `/context` (`claude -p /context`, no model call) shows the current buffer |
 | Claude Code mods (2.1.319) | idle-compact: CLAUDE_CODE_PLUGIN_DIRS read from the settings' env block (inline plugin, hooks module); `turn.start` / `turn.complete` (agentId absent on the main loop, reason), `$.session.usage().context.tokens`, `$.clock.after`, `$.prompt.submit` (works in an idle SDK session; the plugin's UserPromptSubmit command hook sees it, its own `prompt.submit` hooks don't), `$.command.run({ command: "compact", args })` (works in SDK sessions, where `$.session.compact()` refuses), `$.env.get`; Claude Code's own idle compaction still skipping SDK sessions | no notice or no compaction in idle sessions; if Claude Code starts idle-compacting SDK sessions itself, the mod still acts first (50 min) and can stay or go. `claude plugin validate sandbox/mods/idle-compact` and the manual check in §8 |
 | Claude Code one-shot calls (cc-ask, 2.1.319) | `claude -p` flags --system-prompt-file --tools "" --strict-mcp-config --setting-sources "" --disable-slash-commands --no-session-persistence --output-format json --json-schema --effort; result fields result, structured_output, is_error, usage.cache_read/cache_creation_input_tokens; env FORCE_PROMPT_CACHING_5M | cc-ask fails or loses its cache hits (from cache 0 on the second call); the manual check in §8 |
-| Claude Code agent types and compaction on request (2.1.319) | cc mod: plugin agents/*.md with name, description, model inherit, autoCompactWindow, experimental.cacheTtl (kept for plugin agents, which drop permissionMode/hooks/mcpServers); usage.cache_creation.ephemeral_1h/5m_input_tokens in subagent transcripts; their prompt is a copy of the general-purpose agent's (function returning "You are an agent for Claude Code..." in the binary); `turn.complete`'s result `text` (the answer), `$.command.run` compact, `$.prompt.submit` | the types are missing from the Agent tool, a job-worker writes 5-minute cache (ephemeral_5m), or a `[[compact]]` reply isn't compacted; the manual check in §8. After a Claude Code update compare the general-purpose prompt with the agent files' text |
+| Claude Code agent types, compaction on request, waits on jobs (2.1.319) | cc mod: plugin agents/*.md with name, description, model inherit, autoCompactWindow, experimental.cacheTtl (kept for plugin agents, which drop permissionMode/hooks/mcpServers); usage.cache_creation.ephemeral_1h/5m_input_tokens in subagent transcripts; their prompt is a copy of the general-purpose agent's (function returning "You are an agent for Claude Code..." in the binary); `turn.complete`'s result `text` (the answer), `$.command.run` compact, `$.prompt.submit`; `tool.call` rewriting Bash's `timeout` and `command` and adding `context`, its `agentId`, `$.agent.list()` type `cc:worker`, Bash result timedOutAfterMs; BASH_MAX_TIMEOUT_MS | the types are missing from the Agent tool, a job-worker writes 5-minute cache (ephemeral_5m), a `[[compact]]` reply isn't compacted, or a foreground cc-wait is moved to the background ("did not complete within"); the manual check in §8. After a Claude Code update compare the general-purpose prompt with the agent files' text |
 | util-linux unshare (2.37.4), jobs | --user --map-current-user --mount --propagation private | compat.outer_unshare: falls back to --map-user=UID --map-group=GID (never -r: that maps to root) |
 | apptainer 1.5.5 | exec --userns --containall --workdir --home --pwd --nv --bind --env; build --fakeroot; pull | jobwrap: --userns/--containall/--workdir only if `apptainer exec --help` lists them (compat.likely: if --help is unreadable, pass everything as before); APPTAINER_USERNS=1 forces userns anyway. Security does not depend on these: the surrounding bwrap sandbox decides ro/rw |
 | Claude Code (2.1.319) | CLAUDE_CONFIG_DIR/settings.json read by every Claude process (user settings), also by the sessions `claude remote-control` starts (they inherit env and mounts, not flags; the server refuses to start behind --mcp-config/--strict-mcp-config); `allowedMcpServers: []` there hides every MCP server incl. claude.ai connectors, `disableClaudeAiConnectors: true` keeps the connectors from loading (else each session the server starts warns about them on stderr); the managed-settings folder is fixed at /etc/claude-code (no override in the public build); --settings (admin only), --strict-mcp-config, --mcp-config (not for the server; passed only if `claude --help` lists them, else warns), DISABLE_AUTOUPDATER, hook JSON (tool_name, tool_input.file_path/notebook_path, exit 2 = block + stderr), @import in CLAUDE.md | check `claude --help`; config dir layout names in policy.CLAUDE_CONFIG_RO (missing names are skipped) |
@@ -821,7 +849,11 @@ resp. ephemeral_5m_input_tokens (worker). (2) CONTAINEDCLAUDE_COMPACT_OFFER=3000
 the agent's next answer still has the code word. Repeated inside a throwaway project (`containedclaude shell P --
 claude ...`, compact_offer = 3000 in its config.ini): workers spawned from a Haiku session with `model: sonnet`
 ran on Sonnet with the right cache tiers, the marker compacted; with compact_offer = 900000 (a 25k context is
-below 2/3 of it) the agent got the "Not compacted" prompt instead.
+below 2/3 of it) the agent got the "Not compacted" prompt instead. (3) In a throwaway project, Haiku told to run
+`cc-run -- sleep 150` and then a plain `cc-wait JOBID` (no timeout, not in the background), in the main loop and
+in a cc:worker: both waits ended "all done after 2.5 min" in the foreground, the worker reported once. Directly,
+`CONTAINEDCLAUDE_WAIT_LIMIT=0.5 cc-wait JOB` returned after 30 s with exit 2 and the line to go on; cc-log -f
+stopped likewise.
 
 Occasional manual check of cc-ask (2026-11-09, 2.1.319, Haiku 5.5): in a throwaway project, a ~14k-token
 prompt file new to the cache and a tasks.csv of 12 rows (texts with quotes, commas, line breaks; outs in two
