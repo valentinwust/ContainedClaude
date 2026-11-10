@@ -88,6 +88,7 @@ sandbox/hooks/peer_guard.py    Claude UserPromptSubmit + PreToolUse SendMessage 
 sandbox/hooks/context_notice.py  Claude PostToolUse hook for every tool: tells an agent once when it nears
                                auto-compaction and, past compact_offer, the main session that it may ask
                                for compaction (§5.11, §5.13)
+sandbox/hooks/session_title.py  Claude SessionStart hook on resume: gives a session its stored title back (§5.10)
 lib/containedclaude/host_extras.py  add|remove|status: the extras (install.sh --extras) in the user's own
                                settings.json ($CLAUDE_CONFIG_DIR or ~/.claude): context_notice.py, the
                                idle-compact mod (env CLAUDE_CODE_PLUGIN_DIRS) and site.ini's [claude] values
@@ -204,7 +205,7 @@ memory, history, session records, shell snapshots, Codex rollouts, ...) are boun
 4. write_session_settings: run/user-settings.json (0600) = the contained config's settings.json (a JSON object
    with hooks and permissions in a form Claude Code reads, else the start is refused) plus claude_settings
    (PreToolUse hook -> write_guard.py, PreToolUse SendMessage + UserPromptSubmit + PostToolUse ListAgents -> peer_guard.py, PostToolUse
-   Bash hook -> oom_notice.py, PostToolUse * -> context_notice.py, permissions.deny RemoteTrigger) and `allowedMcpServers: []` plus
+   Bash hook -> oom_notice.py, PostToolUse * -> context_notice.py, SessionStart resume -> session_title.py, permissions.deny RemoteTrigger) and `allowedMcpServers: []` plus
    `disableClaudeAiConnectors: true` unless mcp_from_user_config, and an `env` block (project.claude_env: the
    [claude] values, and in CLAUDE_CODE_PLUGIN_DIRS after the user's own the cc mod and with idle_compact the idle-compact mod) (without the second, every session `claude
    remote-control` starts warns about the blocked connectors on stderr, and the server shows that warning in
@@ -575,7 +576,13 @@ peer_guard.py (in the session's settings.json, §3, 4) keeps messages within the
 Like the other hooks this is not a boundary (§1); a separate claude.ai account for the contained config
 separates contained sessions from the user's others completely. The sessions `claude remote-control` starts
 read the same settings.json, so all of this applies there too. Locally they are listed under a derived name
-(`t1-55` in a folder t1); `--name` names only the server's Remote Control entry.
+(`t1-55` in a folder t1) until they get a title; `--name` names only the server's Remote Control entry.
+
+A session that is resumed starts under a new derived name in the session registry (and so in ListAgents and
+in what messages are addressed to), even with a title: after a server restart, only the main session gets its
+title back from claude.ai, which keeps showing the right titles for all of them. The title is still in
+projects/<key>/<session id>/custom-title.json, so session_title.py (SessionStart, matcher resume) returns it as
+`sessionTitle`, and Claude Code applies it to the session and the registry. No title stored: nothing happens.
 
 ### 5.11 Notice before auto-compaction (sandbox/hooks/context_notice.py)
 A convenience, not containment: after every tool call (main session and subagents, which run the same hooks)
@@ -722,6 +729,7 @@ with output, so at 20% the hint could only ever propose the cache.
 | Codex home layout (0.166.0) | sessions/YYYY/MM/DD/rollout-*.jsonl, archived_sessions/, history.jsonl and session_index.jsonl appended in place, shell_snapshots/<thread>.<ts>.sh, tmp/arg0-linux/codex-arg0*/{apply_patch,applypatch,codex-linux-sandbox}, state_N.sqlite thread index (cwd, rollout_path, title, first_user_message), skills/.system (bundled skills, marker file), app-server-control/ + app-server-daemon/ (background server; off) | same doctor section (patterns *.sqlite); `codex resume` of another project's thread fails (rollout not visible), the picker filters by cwd; a read-only skills/ only means the bundled skills update in `admin codex` |
 | Codex CLI (0.166.0) | its own sandbox = a bwrap + seccomp inner layer; needs /tmp to be a real mount (mount root "/") and, for sockets, `[sandbox_workspace_write] network_access = true` in CODEX_HOME/config.toml (seeded by ensure_state); `[features] daemon_auto_start = false` (seeded: otherwise the TUI copies its binary into packages/ and runs a background server); folder trust `[projects."<path>"] trust_level` (written by codex_trust; Codex can't write config.toml in sessions) | `containedclaude test` runs a command under `codex sandbox` (writes the project, reaches the broker); failure shows there and as "bwrap: Can't mkdir parents ..." or "broker not reachable (Operation not permitted)" in Codex output |
 | Claude Code context and compaction (2.1.319) | context_notice.py: PostToolUse input session_id, transcript_path, agent_id/agent_type (subagents only), tool_response, tool_use_id; user records' message.content (tool_result items with tool_use_id), attachment records; transcript records type assistant + message.usage (input + cache_creation_input + cache_read_input tokens) and message.model; subagent transcripts in <session>/subagents/agent-<id>.jsonl; autoCompactWindow in modelSettings / agent frontmatter / CLAUDE_CODE_AUTO_COMPACT_WINDOW; a fixed 33k buffer below the window | the notice comes late, early or never; test's check uses sample transcripts and can't see that, the occasional manual check in §8 does. `/context` (`claude -p /context`, no model call) shows the current buffer |
+| Claude Code session titles (2.1.322) | session_title.py: SessionStart input source, session_id, transcript_path; projects/<key>/<session id>/custom-title.json `{"customTitle": ...}`; output hookSpecificOutput.sessionTitle | A resumed session keeps its derived name in the registry (run/.../claude/sessions/<pid>.json, name and nameSource) and in ListAgents |
 | Claude Code mods (2.1.319) | idle-compact: CLAUDE_CODE_PLUGIN_DIRS read from the settings' env block (inline plugin, hooks module); `turn.start` / `turn.complete` (agentId absent on the main loop, reason), `$.session.usage().context.tokens`, `$.clock.after`, `$.prompt.submit` (works in an idle SDK session; the plugin's UserPromptSubmit command hook sees it, its own `prompt.submit` hooks don't), `$.command.run({ command: "compact", args })` (works in SDK sessions, where `$.session.compact()` refuses), `$.env.get`; Claude Code's own idle compaction still skipping SDK sessions | no notice or no compaction in idle sessions; if Claude Code starts idle-compacting SDK sessions itself, the mod still acts first (50 min) and can stay or go. `claude plugin validate sandbox/mods/idle-compact` and the manual check in §8 |
 | Claude Code one-shot calls (cc-ask, 2.1.319) | `claude -p` flags --system-prompt-file --tools "" --strict-mcp-config --setting-sources "" --disable-slash-commands --no-session-persistence --output-format json --json-schema --effort; result fields result, structured_output, is_error, usage.cache_read/cache_creation_input_tokens; env FORCE_PROMPT_CACHING_5M, DISABLE_PROMPT_CACHING; total_cost_usd, modelUsage keys (model ids, for READ); cost computed from the tokens (prices() fits on it), cache writes 1.25x | cc-ask fails or loses its cache hits (from cache 0 on the second call); the manual check in §8 |
 | Claude Code agent types, compaction on request, waits on jobs (2.1.319) | cc mod: plugin agents/*.md with name, description, model inherit, autoCompactWindow, experimental.cacheTtl (kept for plugin agents, which drop permissionMode/hooks/mcpServers); usage.cache_creation.ephemeral_1h/5m_input_tokens in subagent transcripts; their prompt is a copy of the general-purpose agent's (function returning "You are an agent for Claude Code..." in the binary); `turn.complete`'s result `text` (the answer), `$.command.run` compact, `$.prompt.submit`; `tool.call` rewriting Bash's `timeout` and `command` and adding `context`, its `agentId`, `$.agent.list()` type `cc:worker`, Bash result timedOutAfterMs; BASH_MAX_TIMEOUT_MS | the types are missing from the Agent tool, a job-worker writes 5-minute cache (ephemeral_5m), a `[[compact]]` reply isn't compacted, or a foreground cc-wait is moved to the background ("did not complete within"); the manual check in §8. After a Claude Code update compare the general-purpose prompt with the agent files' text |
@@ -903,6 +911,12 @@ $0.0029 with the cache, where the cached run cost $0.0026; a cached run gave non
 characters, -j 4, the hint printed always via HINT): the estimate after 4-5 rows was 7%, 4.5%, 2%, 1% under the
 total (README prompt with and without the cache, a 6-token prompt with and without); each run's hint for the
 other setting was within 2% of that run's cost; --budget 0.004 stopped at $0.00398.
+
+Session titles on resume (session_title.py, 2026-11-10, 2.1.322): in a contained shell, a session with a
+custom-title.json resumed with `claude -p --input-format stream-json --resume` (entrypoint sdk-cli, as a Remote
+Control server runs them) had registry name "Name A" and a session_title_changed event; with
+`--settings '{"disableAllHooks":true}'` it had the derived `cctest-4b`; without a stored title, the derived name
+and no error.
 
 ---------------------------------------------------------------------------------------------------------------
 ## 9. How to change common things

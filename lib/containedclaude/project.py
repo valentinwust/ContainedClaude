@@ -803,6 +803,8 @@ def claude_settings(cfg):
                            {"matcher": "SendMessage", "hooks": cmd("peer_guard.py")}],
             # and only from the sessions of this project
             "UserPromptSubmit": [{"hooks": cmd("peer_guard.py")}],
+            # a resumed session gets its title back (a server restart leaves it under a generated name)
+            "SessionStart": [{"matcher": "resume", "hooks": cmd("session_title.py")}],
             # after a command: tell the agent when a process was killed by the session memory limit
             "PostToolUse": [{"matcher": "Bash", "hooks": cmd("oom_notice.py")},
                             # after any tool, in the session and its subagents: close to auto-compaction

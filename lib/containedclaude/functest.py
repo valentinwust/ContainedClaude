@@ -308,7 +308,8 @@ def session_checks(td):
         assert os.path.samefile(os.path.join(cfgdir, "settings.json"), policy.settings_inside(cfg)), \
             "the config's settings.json is not the launcher's copy"
         hooks = json.dumps(st.get("hooks"))
-        missing = [h for h in ("write_guard.py", "peer_guard.py", "oom_notice.py", "context_notice.py") if h not in hooks]
+        missing = [h for h in ("write_guard.py", "peer_guard.py", "oom_notice.py", "context_notice.py",
+                                                "session_title.py") if h not in hooks]
         assert not missing and hooks.count("peer_guard.py") == 3, "hooks missing: %s" % " ".join(missing)
         assert "RemoteTrigger" in st.get("permissions", {}).get("deny", []), "RemoteTrigger is not denied"
         no_mcp = not cfg.bool("sandbox", "mcp_from_user_config")
