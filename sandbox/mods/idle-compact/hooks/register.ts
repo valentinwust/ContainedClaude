@@ -45,7 +45,7 @@ export const register: Register = on => {
       return result
     }
     const after = await number($.env.get('CONTAINEDCLAUDE_IDLE_COMPACT_AFTER'), 50)
-    const minTokens = await number($.env.get('CONTAINEDCLAUDE_IDLE_COMPACT_MIN_TOKENS'), 200000)
+    const minTokens = await number($.env.get('CONTAINEDCLAUDE_IDLE_COMPACT_MIN_TOKENS'), 150000)
     const tokens = (await $.session.usage()).context.tokens ?? 0
     if (tokens < minTokens) return result
     timer = $.clock.after(after * 60000, () => {

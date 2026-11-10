@@ -622,6 +622,11 @@ settings' env (CONTAINEDCLAUDE_IDLE_COMPACT_*); idle_compact = no leaves the mod
 settings' env, so it needs no install and reaches server sessions too; edits to the mod reach a session at its
 next start. In a terminal session it acts before Claude Code's own (50 < 55 min), which then finds a small
 context. Not covered: Codex; a session whose process ends while idle (nothing left to compact).
+Why 150k, below compact_offer's 180k: an idle compaction saves the full rewrite of the context (1-hour write,
+2x input) when the person returns after the cache expired, not just cache reads. A replay of the main sessions
+(about $1000; idle points >= 50 min) netted +$59 at 50k, +$89 at 100k and 150k, +$78 at 200k, +$72 at 300k;
+resumed points paid off 26% below 100k, 67% at 100-150k, 81-100% above. The losses are sessions never resumed
+(about $0.5 each, an upper bound: a closed session doesn't compact).
 
 ### 5.13 Worker agent types, compaction on request, waits on jobs (sandbox/mods/cc)
 A cost lever, not containment. The cc mod is in every contained session (project.claude_env; not in the host

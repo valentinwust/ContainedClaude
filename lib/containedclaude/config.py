@@ -120,7 +120,7 @@ DEFAULTS = {
         "compact_offer": "180000",           # main session: past this, it may ask for compaction; 0 = never
         "idle_compact": "yes",               # notes + compaction before the prompt cache expires (sandbox/mods)
         "idle_compact_after": "50",          # minutes idle (the cache lasts 60)
-        "idle_compact_min_tokens": "200000",
+        "idle_compact_min_tokens": "150000",
     },
 }
 

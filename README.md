@@ -143,7 +143,7 @@ job.
   and limits, extra `sbatch` options.
 - `[claude]`, compaction notice and idle compaction: `compact_notice` tells an agent this many tokens before
   auto-compaction that it may want to write down what matters (25000; 0 = never). With `idle_compact`, a
-  session idle for `idle_compact_after` minutes (50) with at least `idle_compact_min_tokens` (200000) is asked
+  session idle for `idle_compact_after` minutes (50) with at least `idle_compact_min_tokens` (150000) is asked
   for notes and compacted right after its answer, before the 1-hour prompt cache expires and your next message
   would send the whole context again at full price. Claude Code does that itself only in a terminal; this
   covers Remote Control sessions too. Past `compact_offer` tokens (180000; 0 = never) the main session is told
