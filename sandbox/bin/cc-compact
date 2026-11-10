@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""cc-compact [WHAT TO KEEP]
+
+Compacts this conversation when the current turn ends, for the main session of a contained Claude session once
+the compaction offer has come (past compact_offer tokens). WHAT TO KEEP goes to the summary along with fixed
+instructions. After the compaction you are prompted to continue. The cc mod does the work (DEVELOPMENT.md
+§5.13): it refuses the command in a subagent and below the offer's size; this only prints what it reads.
+"""
+import os
+import sys
+
+if sys.argv[1:2] in (["-h"], ["--help"]):
+    print(__doc__.strip())
+    sys.exit(0)
+keep = " ".join(sys.argv[1:]).strip()
+print("Compaction scheduled for the end of this turn: finish your reply now; you are prompted to continue then.")
+if keep:
+    print("Keep: " + keep)          # the cc mod reads it from here (KEEP in register.ts)

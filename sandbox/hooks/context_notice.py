@@ -5,10 +5,12 @@ write down what a summary would lose. Silent again until its usage drops below t
 
 Context used = the newest assistant record's usage in the agent's own transcript (input + cache creation + cache
 read tokens, what Claude Code counts) plus a rough estimate (characters / 3) of what came in after it and goes
-into the next request: tool results of parallel calls and attachments already written, and this tool's result. Compaction starts BUFFER tokens below the window (/context: "Autocompact buffer 33k"). The
-window, first match wins: CLAUDE_CODE_AUTO_COMPACT_WINDOW, the
-subagent definition's autoCompactWindow, modelSettings.<model>.autoCompactWindow in the settings files (local >
-project > user), else 200k (Claude Code's own fallback), or 1M once usage is past 200k.
+into the next request: tool results of parallel calls and attachments already written, and this tool's result.
+Compaction starts BUFFER tokens below the window (/context: "Autocompact buffer 33k"). The window, first match
+wins: CLAUDE_CODE_AUTO_COMPACT_WINDOW, the subagent definition's autoCompactWindow,
+modelSettings.<model>.autoCompactWindow in the settings files (local > project > user), the model's context
+window in Claude Code's model catalog (fetched from Anthropic, so it knows new models; at most 200k with
+CLAUDE_CODE_DISABLE_1M_CONTEXT), else 200k (Claude Code's own fallback), or 1M once usage is past 200k.
 
 With CONTAINEDCLAUDE_COMPACT_OFFER (contained sessions), the main session also hears once, past that many tokens
 and before the notice above is due, that it may ask for compaction (the cc mod acts on it).
@@ -139,6 +141,27 @@ def agent_window(agent_type, dirs):
     return None
 
 
+def catalog_window(config, model):
+    """The model's context window as Claude Code reads it from its model catalog cache (runtime.max_input_tokens,
+    else context_window), from the newest catalog file that lists the model; None if none does."""
+    def mtime(f):
+        try:
+            return os.path.getmtime(f)
+        except OSError:
+            return 0
+    def get(d, key):
+        return d.get(key) if isinstance(d, dict) else None
+    files = glob.glob(os.path.join(config, "cache", "model-catalog", "*.json"))
+    for f in sorted(files, key=mtime, reverse=True):
+        models = get(get(load_json(f).get("catalog"), "config"), "models")
+        for m in models if isinstance(models, list) else []:
+            if get(m, "id") == model:
+                w = positive_int(get(get(m, "runtime"), "max_input_tokens") or get(m, "context_window"))
+                if w is not None:
+                    return min(w, DEFAULT_WINDOW) if os.environ.get("CLAUDE_CODE_DISABLE_1M_CONTEXT") else w
+    return None
+
+
 def window(model, tokens, agent_type, project):
     config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     w = positive_int(os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"))
@@ -152,6 +175,8 @@ def window(model, tokens, agent_type, project):
             w = positive_int(entry.get("autoCompactWindow")) if isinstance(entry, dict) else None
             if w is not None:
                 break
+    if w is None and model:
+        w = catalog_window(config, model)
     if w is None:
         w = LONG_WINDOW if tokens > DEFAULT_WINDOW else DEFAULT_WINDOW
     return w
@@ -207,12 +232,12 @@ NEAR = ("containedclaude: your context holds about %dk tokens and auto-compactio
         "summarize this conversation soon and details that live only in the conversation may be lost. Consider "
         "writing down what matters (state, decisions, paths, open work) where you or the user will find it; then "
         "continue as you judge best.")
-# the line starting with [[compact]] is MARK in sandbox/mods/cc/hooks/register.ts
+# cc-compact: sandbox/bin, done by the cc mod (sandbox/mods/cc/hooks/register.ts)
 OFFER = ("containedclaude: your context holds about %dk tokens. If much of it is no longer needed (images and logs "
          "already read, finished subtasks) and a good part of the work remains (more than about 20 tool calls), "
-         "you can have it compacted: write down what matters, then end your reply with a last line "
-         "`[[compact]] <what the summary must keep>`. The conversation is compacted when your turn ends, and you "
-         "are prompted to continue. Otherwise carry on; this notice comes once.")
+         "you can have it compacted: write down what matters, run `cc-compact \"<what the summary must keep>\"`, "
+         "and end your reply. The conversation is compacted when your turn ends, and you are prompted to "
+         "continue. Otherwise carry on; this notice comes once.")
 
 
 def once(flag, due):

@@ -147,14 +147,14 @@ job.
   for notes and compacted right after its answer, before the 1-hour prompt cache expires and your next message
   would send the whole context again at full price. Claude Code does that itself only in a terminal; this
   covers Remote Control sessions too. Past `compact_offer` tokens (180000; 0 = never) the main session is told
-  once that it may ask for compaction when much of its context is no longer needed: a reply ending in a line
-  `[[compact]] <what to keep>` compacts it once the turn ends, and it is prompted to continue.
+  once that it may ask for compaction when much of its context is no longer needed: `cc-compact "<what to
+  keep>"` compacts it once the turn ends, and it is prompted to continue.
 
 Model, effort and auto-compaction window are Claude's and Codex's own settings, in the contained config shared
 by all projects (change them with `containedclaude admin` / `admin codex`, or edit the files):
-- Claude: `modelSettings` (`autoCompactWindow`, `effortLevel` per model) and `effortLevel` in
-  `~/.local/share/containedclaude/claude-config/settings.json`, copied at each sandbox start (a running server
-  keeps the old values).
+- Claude: `modelSettings` (`autoCompactWindow`, `effortLevel` per model; without a window a model compacts near
+  its full context window) and `effortLevel` in `~/.local/share/containedclaude/claude-config/settings.json`,
+  copied at each sandbox start (a running server keeps the old values).
 - Codex: `model`, `model_reasoning_effort`, `model_auto_compact_token_limit` above the first `[section]` of
   `~/.local/share/containedclaude/codex-home/config.toml`, used by every new Codex session.
 

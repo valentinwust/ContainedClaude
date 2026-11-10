@@ -520,18 +520,24 @@ def session_checks(td):
                     wrong.append("step %d: %r" % (i + 1, got[:60] or "silent"))
             assert not wrong, "; ".join(wrong)
             # compact_offer 180k on a 1M window: the main session hears once that it may ask for compaction,
-            # subagents never; the notice before auto-compaction still comes (offer None = that notice)
+            # subagents never; the notice before auto-compaction still comes (offer None = that notice). m-cat
+            # has no modelSettings but a 1M window in Claude Code's model catalog: no notice at 150k
             env["CONTAINEDCLAUDE_COMPACT_OFFER"] = "180000"
             with open(os.path.join(d, "settings.json"), "w") as fh:
                 json.dump({"modelSettings": {"m-huge": {"autoCompactWindow": 1000000}}}, fh)
+            os.makedirs(os.path.join(d, "cache", "model-catalog"))
+            with open(os.path.join(d, "cache", "model-catalog", "org-cc.json"), "w") as fh:
+                json.dump({"version": 2, "catalog": {"config": {"models": [
+                    {"id": "m-cat", "runtime": {"max_input_tokens": 1000000}}]}}}, fh)
             offers = [(main_t, 170000, None, False), (main_t, 185000, None, True), (main_t, 190000, None, False),
                       (sub_t, 190000, "a1", False), (main_t, 60000, None, False), (main_t, 185000, None, True),
-                      (main_t, 950000, None, None)]
-            for i, (path, tokens, agent, want) in enumerate(offers):
-                usage(path, tokens, "m-huge")
+                      (main_t, 950000, None, None), (main_t, 60000, None, False),
+                      (main_t, 150000, None, False, "m-cat"), (main_t, 185000, None, True, "m-cat")]
+            for i, (path, tokens, agent, want, *model) in enumerate(offers):
+                usage(path, tokens, model[0] if model else "m-huge")
                 got = said(agent)
                 if (want is None and "auto-compaction starts" not in got) or \
-                        (want is not None and ("[[compact]]" in got) != want or want is False and got):
+                        (want is not None and ("cc-compact" in got) != want or want is False and got):
                     wrong.append("offer step %d: %r" % (i + 1, got[:60] or "silent"))
             assert not wrong, "; ".join(wrong)
         finally:

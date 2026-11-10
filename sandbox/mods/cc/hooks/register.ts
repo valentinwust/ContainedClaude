@@ -1,17 +1,22 @@
 import type { Register } from 'claude-code'
 
 // ContainedClaude (DEVELOPMENT.md §5.13): compaction when the main session asks for it. Past compact_offer tokens,
-// hooks/context_notice.py tells the main session once that it may end a reply with a line starting with MARK.
-// When a main-loop answer ends so, this runs /compact with the rest of that line as instructions (as the
-// idle-compact mod does: $.session.compact refuses in SDK sessions), then prompts the agent to go on. Below
-// 2/3 of compact_offer it doesn't compact (too small to pay off) and says so. A mod can't compact a subagent
-// (2.1.319); the worker types in agents/ compact at ~180k instead. Keep MARK in step with context_notice.py.
-const MARK = '[[compact]]'
+// hooks/context_notice.py tells the main session once that it may run cc-compact (sandbox/bin), which only prints
+// the request (run as typed: a prefix would make it a compound command to approve). When that turn ends, this
+// runs a bare /compact (as the idle-compact mod does: $.session.compact refuses in SDK sessions) whose summarizer
+// gets what to keep through the session.compact hook, so the visible command stays short; then it prompts the
+// agent to go on. Below 90% of compact_offer (room for the notice's estimate) it refuses: too small to pay off.
+// A mod can't compact a subagent (2.1.319); the worker types in agents/ compact at ~180k instead.
+const COMPACT = /^\s*cc-compact(\s|$)/
+const KEEP = '\nKeep: '      // cc-compact's line with what to keep
 const INSTRUCTIONS =
   'Keep file paths, decisions, open work, job IDs and where notes were written, word for word.'
 const DONE = 'Compacted as you asked. Continue where you left off.'
-const SMALL = (k: number) =>
-  `Not compacted: the context holds only ${k}k tokens, too little for compaction to pay off. Continue where you left off.`
+const SUBAGENT = 'cc-compact: nothing done: only the main session can be compacted on request.'
+const OFF = 'cc-compact: nothing done: compaction on request is off in this project (compact_offer = 0).'
+const SMALL = (k: number, min: number) =>
+  `cc-compact: nothing done: the context holds only ${k}k tokens; below about ${min}k compaction costs more ` +
+  'than it saves. Carry on.'
 
 // Waits on jobs (cc-wait, cc-run --wait, cc-log -f) that the agent runs in the foreground: Bash's timeout (2
 // minutes unless set) would move them to the background mid-run, and the agent then works around that (sleep,
@@ -46,8 +51,22 @@ const BG_NOTE =
 
 export const register: Register = on => {
   const types = new Map<string, string>()
+  let asked: string | undefined      // cc-compact ran this turn: what to keep ('' for nothing)
+  let compacting: string | undefined  // the instructions for the /compact this mod runs
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    if (COMPACT.test(e.command)) {
+      if (e.agentId !== undefined) return { deny: SUBAGENT }
+      const offer = Number(await $.env.get('CONTAINEDCLAUDE_COMPACT_OFFER'))
+      if (!Number.isFinite(offer) || offer <= 0) return { deny: OFF }
+      const tokens = (await $.session.usage()).context.tokens ?? 0
+      if (tokens < offer * 0.9) return { deny: SMALL(Math.round(tokens / 1000), Math.round(offer * 0.9 / 1000)) }
+      const ran = await next(e)
+      const text = ran.text ?? ''
+      if (ran.deny === undefined && !ran.isError)
+        asked = text.includes(KEEP) ? text.slice(text.indexOf(KEEP) + KEEP.length).trim() : ''
+      return ran
+    }
     let worker = false
     if (e.agentId !== undefined) {
       if (!types.has(e.agentId))
@@ -76,21 +95,22 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
-    if (e.agentId !== undefined || e.reason !== 'answer') return result
-    const last = result.text.trimEnd().split('\n').pop()?.trim() ?? ''
-    if (!last.startsWith(MARK)) return result
-    const offer = Number(await $.env.get('CONTAINEDCLAUDE_COMPACT_OFFER'))
-    if (!Number.isFinite(offer) || offer <= 0) return result
-    const tokens = (await $.session.usage()).context.tokens ?? 0
-    const fail = (err: unknown) => $.ui.log(`cc: compaction on request failed: ${String(err)}`, { to: 'debug' })
-    if (tokens < (offer * 2) / 3) {
-      $.prompt.submit({ text: SMALL(Math.round(tokens / 1000)) }).catch(fail)
-      return result
-    }
-    const keep = last.slice(MARK.length).trim()
-    $.command.run({ command: 'compact', args: keep ? `${keep} ${INSTRUCTIONS}` : INSTRUCTIONS })
+    if (e.agentId !== undefined) return result
+    const keep = asked
+    asked = undefined                   // an interrupted turn drops the request
+    if (keep === undefined || e.reason !== 'answer') return result
+    compacting = keep ? `${keep} ${INSTRUCTIONS}` : INSTRUCTIONS
+    $.command.run({ command: 'compact' })
       .then(() => $.prompt.submit({ text: DONE }))
-      .catch(fail)
+      .catch(err => $.ui.log(`cc: compaction on request failed: ${String(err)}`, { to: 'debug' }))
+      .finally(() => { compacting = undefined })
     return result
+  })
+
+  on('session.compact', async ($, e, next) => {
+    if (e.agentId !== undefined || compacting === undefined) return next(e)
+    const instructions = compacting
+    compacting = undefined
+    return next({ ...e, instructions })
   })
 }
