@@ -21,8 +21,8 @@ and, once N rows like the rest are done, an estimate for the rest (from those ro
 replies of other lengths cost more or less). If the other cache setting (see --no-cache) would cost over 10%
 less, a hint says so then and at the end.
 --budget USD: starts no row that would take the total (at API prices, as above: on the subscription that is
-how much of the usage limits the batch takes) over USD, counting the rows still running at the average cost
-per row; those finish. Then exits 3; run it again, with a higher budget, to go on where it stopped.
+how much of the usage limits the batch takes) over USD, counting the rows still running at their predicted
+cost; those finish. Then exits 3; run it again, with a higher budget, to go on where it stopped.
 
 The prompt is read from the cache, and only the text and the reply are new, if:
   - PROMPT_FILE (and --schema, which sits before it in the cached part) is byte-identical in every call;
@@ -31,11 +31,12 @@ The prompt is read from the cache, and only the text and the reply are new, if:
     first call has finished before others start (calls started together each write their own cache).
     cc-ask-batch does both; with cc-ask, run one alone first.
   - From the second call on, "from cache" is about the prompt's size. Prompts under about 500 tokens are not
-    cached, but cost little anyway.
---no-cache: nothing is read from or written to the cache, all input is billed at the plain price. Cheaper
-only for a call with no other one on the same prompt within 5 minutes: a cache write costs 1.25x, and the
-text (with ~550 tokens Claude Code adds) is written each call although never read again. In a batch the
-cache pays from the second row on; with --no-cache all rows run N at a time.
+    cached (yet each call writes its input to the cache: see --no-cache).
+--no-cache: nothing is read from or written to the cache, all input is billed at the plain price. A cache
+write costs 1.25x, and the text (with ~550 tokens Claude Code adds) is written each call although never read
+again. So --no-cache is cheaper for a call with no other one on the same prompt within 5 minutes, and for a
+prompt under ~500 tokens (never read back); otherwise the cache pays from the second row on. cc-ask-batch's
+hint says when the other setting would be cheaper. With --no-cache all rows run N at a time.
 On haiku a call costs 5x as much once prompt and text together exceed 100k tokens.
 """
 import concurrent.futures

@@ -672,7 +672,8 @@ prompt is the cached prefix; the message (the text plus ~550 tokens Claude Code 
 `claude -p` writes the 1-hour cache by default (2x input); FORCE_PROMPT_CACHING_5M=1 makes it 5-minute
 (1.25x), as the calls follow one another. --no-cache sets DISABLE_PROMPT_CACHING=1 instead (and drops the
 per-model DISABLE_PROMPT_CACHING_* otherwise): all input at 1x, for a lone call (a write of prompt and message
-at 1.25x is never read); cc-ask-batch then starts every row at once. --json-schema adds a StructuredOutput tool the model answers with:
+at 1.25x is never read) or a prompt under 512 tokens (never cached, each call still writes its
+input); cc-ask-batch then starts every row at once. --json-schema adds a StructuredOutput tool the model answers with:
 still one API request (num_turns says 2, but the tool result is only recorded, not sent; measured on Haiku 5.5).
 The tool definition precedes the system prompt in the cached prefix, so the schema must stay the same too. Not --bare: it allows only
 ANTHROPIC_API_KEY, so it would bypass the subscription login. Texts go through stdin (one argument may hold at

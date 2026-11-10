@@ -130,8 +130,9 @@ For long jobs, `background_terminal_max_timeout = 7200000` above the first `[sec
 - **The same instructions for many texts** (summarise, classify, extract): `cc-ask-batch prompt.md tasks.csv`
   makes one model call per row (columns `text`, `out`: the reply's file), without tools and on your
   subscription, with the shared prompt read from the prompt cache. `--model` (haiku by default), `--effort` (more thinking), `--schema`
-  (the reply as JSON in that shape), `--no-cache` (cheaper only for a lone call), `-j` (8 at a time), `--budget USD` (starts no row past it; it
-  prints an estimate after the first rows); `cc-ask prompt.md text.txt reply.md` for one text,
+  (the reply as JSON in that shape), `--no-cache` (cheaper for a lone call or a prompt under ~500 tokens), `-j` (8 at a time), `--budget USD`
+  (starts no row past it). After the first rows it prints an estimate for the rest, and a hint if the other
+  cache setting would cost over 10% less; `cc-ask prompt.md text.txt reply.md` for one text,
   `cc-ask --help` for how to keep the cache hits.
 
 ## Configure
