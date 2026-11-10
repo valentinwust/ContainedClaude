@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """cc-ask       [--model MODEL] [--effort LEVEL] [--schema SCHEMA_FILE] [--no-cache] PROMPT_FILE TEXT_FILE OUT_FILE
-cc-ask-batch [--model MODEL] [--effort LEVEL] [--schema SCHEMA_FILE] [--no-cache] [-j N] PROMPT_FILE TASKS.csv
+cc-ask-batch [--model MODEL] [--effort LEVEL] [--schema SCHEMA_FILE] [--no-cache] [-j N] [--budget USD]
+             PROMPT_FILE TASKS.csv
 
 One model call per text, without tools: PROMPT_FILE is the system prompt, the text the message, the reply is
 written to a file. Runs `claude -p` on the user's Claude subscription (default model haiku; also sonnet, opus).
@@ -15,7 +16,13 @@ price `claude -p` reports: what it would cost via the API; the subscription does
 cc-ask-batch: TASKS.csv has a header row with the columns `text` (the text itself; quote it if it holds commas,
 quotes or line breaks, as Python's csv module and pandas' to_csv do) and `out` (the reply's file, relative to
 the current folder; folders are created). The first call runs alone, then N at a time (default 8, at most 16).
-Rows whose `out` exists are skipped, so after a failure run it again. Prints failures, cache misses, a total.
+Rows whose `out` exists are skipped, so after a failure run it again. Prints failures, cache misses, a total,
+and, once N rows like the rest are done, an estimate for the rest (from those rows and each text's length;
+replies of other lengths cost more or less). If the other cache setting (see --no-cache) would cost over 10%
+less, a hint says so then and at the end.
+--budget USD: starts no row that would take the total (at API prices, as above: on the subscription that is
+how much of the usage limits the batch takes) over USD, counting the rows still running at the average cost
+per row; those finish. Then exits 3; run it again, with a higher budget, to go on where it stopped.
 
 The prompt is read from the cache, and only the text and the reply are new, if:
   - PROMPT_FILE (and --schema, which sits before it in the cached part) is byte-identical in every call;
@@ -27,13 +34,14 @@ The prompt is read from the cache, and only the text and the reply are new, if:
     cached, but cost little anyway.
 --no-cache: nothing is read from or written to the cache, all input is billed at the plain price. Cheaper
 only for a call with no other one on the same prompt within 5 minutes: a cache write costs 1.25x, and the
-text (with ~600 tokens Claude Code adds) is written each call although never read again. In a batch the
+text (with ~550 tokens Claude Code adds) is written each call although never read again. In a batch the
 cache pays from the second row on; with --no-cache all rows run N at a time.
 On haiku a call costs 5x as much once prompt and text together exceed 100k tokens.
 """
 import concurrent.futures
 import csv
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -41,16 +49,24 @@ import sys
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 KEYS = ("cache_read_input_tokens", "cache_creation_input_tokens", "input_tokens", "output_tokens")
+# Pricing for the estimate and the hint, where the batch's own rows can't show it (prices()): cache reads cost
+# 0.1x the input price, less on these models; output 5x. Cache writes cost 1.25x (5-minute cache) on every model.
+# Prefixes under 512 tokens aren't cached.
+READ = (("opus-5-5", 0.05), ("fable-5-1", 0.025), ("mythos-5-1", 0.025))
+MIN_CACHED = 512
+HINT = 0.9                          # the hint when the other setting costs less than this x the current
 DISABLE = tuple("DISABLE_PROMPT_CACHING" + m for m in ("", "_HAIKU", "_SONNET", "_OPUS", "_FABLE", "_MYTHOS"))
 
 
 class Failed(Exception):
-    pass
+    def __init__(self, msg, cost=0):
+        super().__init__(msg)
+        self.cost = cost            # what the failed call cost (0 if it reported nothing)
 
 
 def ask(cmd, text, out, cache=True):
     """One call with the message `text` (bytes): the reply into `out` (written whole or not at all).
-    Returns (usage, cost in USD)."""
+    Returns (usage, cost in USD, model)."""
     env = dict(os.environ)
     for k in ("CLAUDE_CODE_PLUGIN_DIRS", "ENABLE_PROMPT_CACHING_1H", "CLAUDE_CODE_PROMPT_CACHE_TTL",
               "CLAUDE_CODE_MESSAGES_PROMPT_CACHE_TTL", "FORCE_PROMPT_CACHING_5M") + DISABLE:
@@ -63,13 +79,21 @@ def ask(cmd, text, out, cache=True):
         raise Failed("claude failed (exit %d): %s" % (p.returncode, (p.stderr or p.stdout).decode()[-2000:]))
     schema = "--json-schema" in cmd
     if d.get("is_error") or not isinstance(d.get("result"), str) or (schema and d.get("structured_output") is None):
-        raise Failed(str(d.get("result") or d.get("subtype") or "no reply"))
+        raise Failed(str(d.get("result") or d.get("subtype") or "no reply"), d.get("total_cost_usd") or 0)
     reply = json.dumps(d["structured_output"], ensure_ascii=False, indent=1) if schema else d["result"]
     with open(out + ".part", "w") as fh:
         fh.write(reply.rstrip("\n") + "\n")
     os.replace(out + ".part", out)
     u = d.get("usage") or {}
-    return {k: u.get(k) or 0 for k in KEYS}, d.get("total_cost_usd") or 0
+    models = d.get("modelUsage") or {}
+    model = max(models, key=lambda m: (models[m] or {}).get("costUSD") or 0, default="")
+    return {k: u.get(k) or 0 for k in KEYS}, d.get("total_cost_usd") or 0, model
+
+
+def usd(x):
+    if x >= 1 or x <= 0:
+        return "$%.2f" % x
+    return "$%.*f" % (min(8, 2 - math.floor(math.log10(x))), x)     # 3 significant digits
 
 
 def line(u):
@@ -98,7 +122,64 @@ def tasks(path):
     return [(r["text"], o) for r, o in zip(rows, outs)]
 
 
-def batch(cmd, path, jobs, cache):
+def solve(xs, ys):
+    """Least squares y = sum(c_j x_j), no intercept: the c_j, or None if the columns don't pin them down."""
+    k = len(xs[0])
+    if len(xs) < k:
+        return None
+    scale = [max(abs(x[j]) for x in xs) or 1.0 for j in range(k)]
+    xs = [[x[j] / scale[j] for j in range(k)] for x in xs]
+    a = [[sum(x[i] * x[j] for x in xs) for j in range(k)] + [sum(x[i] * y for x, y in zip(xs, ys))] for i in range(k)]
+    for i in range(k):
+        p = max(range(i, k), key=lambda r: abs(a[r][i]))
+        if abs(a[p][i]) < 1e-9 * len(xs):
+            return None
+        a[i], a[p] = a[p], a[i]
+        for r in range(k):
+            if r != i:
+                f = a[r][i] / a[i][i]
+                a[r] = [v - f * w for v, w in zip(a[r], a[i])]
+    return [a[i][k] / a[i][i] / scale[i] for i in range(k)]
+
+
+def prices(us, costs, model):
+    """(input price per token, read factor, output factor). Claude Code computes each cost from the tokens, so a
+    few rows pin the prices down: with reads among them all three, else input and output (the read factor then
+    from READ). If the fit isn't exact (within 1%), or too few rows: READ and 5, the input price from the costs."""
+    xs = [(u["input_tokens"] + 1.25 * u["cache_creation_input_tokens"], u["cache_read_input_tokens"],
+           u["output_tokens"]) for u in us]
+    read = next((f for m, f in READ if m in model), 0.1)
+
+    def exact(cols, sol, rows):
+        return sol and min(sol) > 0 and all(abs(sum(c * v for c, v in zip(sol, cols(x))) - y) <= 0.01 * y
+                                            for x, y in rows)
+    rows = list(zip(xs, costs))
+    if any(x[1] for x in xs):
+        sol = solve([list(x) for x in xs], costs)
+        if exact(lambda x: x, sol, rows):
+            return sol[0], sol[1] / sol[0], sol[2] / sol[0]
+    plain = [(x, y) for x, y in rows if not x[1]]
+    if plain:
+        sol = solve([[x[0], x[2]] for x, _ in plain], [y for _, y in plain])
+        if exact(lambda x: (x[0], x[2]), sol, plain):
+            return sol[0], read, sol[1] / sol[0]
+    units = sum(x[0] + read * x[1] + 5 * x[2] for x in xs)
+    return (sum(costs) / units if units else 0), read, 5
+
+
+def fit_line(pts, extra):
+    """y = c0 + q b over pts [(b, y)]; if the b don't vary (or the slope comes out negative), q is y per byte of
+    extra + b."""
+    n = len(pts)
+    mb, my = sum(b for b, _ in pts) / n, sum(y for _, y in pts) / n
+    var = sum((b - mb) ** 2 for b, _ in pts)
+    q = sum((b - mb) * (y - my) for b, y in pts) / var if var else -1
+    if q < 0:
+        q = my / (extra + mb) if extra + mb else 0
+    return my - q * mb, q
+
+
+def batch(cmd, path, jobs, cache, budget, prefix_bytes):
     rows = tasks(path)
     todo = [(t, o) for t, o in rows if not os.path.exists(o)]
     if not todo:
@@ -106,41 +187,132 @@ def batch(cmd, path, jobs, cache):
         return 0
     for d in {os.path.dirname(o) for _, o in todo} - {""}:
         os.makedirs(d, exist_ok=True)
-    print("cc-ask-batch: %d texts (%d already answered); %s %d at a time"
-          % (len(todo), len(rows) - len(todo), "the first alone, then" if cache else "no cache,", jobs), flush=True)
+    alone = cache or budget is not None     # the first writes the cache the others read; or shows what a row costs
+    print("cc-ask-batch: %d texts (%d already answered); %s%s%d at a time%s"
+          % (len(todo), len(rows) - len(todo), "" if cache else "no cache, ", "the first alone, then " if alone else "",
+             jobs, "" if budget is None else ", budget $%g" % budget), flush=True)
     total, cost, failed, misses = dict.fromkeys(KEYS, 0), [0.0], [], []
+    done_rows, model, nocost = [], [""], []     # (usage, cost, text bytes, wrote the prompt first) of answered rows
+    memo = [None, None]
 
-    def done(n, res, first=False):
-        u, c = res
+    def done(n, res, text_bytes, is_first=False):
+        u, c, model[0] = res
         cost[0] += c
         for k in KEYS:
             total[k] += u[k]
-        if cache and not first and u["cache_read_input_tokens"] == 0 and u["cache_creation_input_tokens"] >= 500:
+        if cache and not is_first and u["cache_read_input_tokens"] == 0 and u["cache_creation_input_tokens"] >= 500:
             misses.append(n)
+        done_rows.append((u, c, text_bytes, cache and is_first and not u["cache_read_input_tokens"]))
+        if budget is not None and not c and any(u.values()):
+            nocost.append(n)        # the budget can't be kept: start nothing more
 
-    if cache:                       # the first writes the cache the others read
+    def shape():
+        """The prices and a row's parts in tokens: (input price, read factor, output factor, prompt, message
+        tokens without the text, message tokens per text byte, reply), from the answered rows."""
+        if memo[0] != len(done_rows):
+            us, cs = [r[0] for r in done_rows], [r[1] for r in done_rows]
+            a, read, out = prices(us, cs, model[0])
+            reads = [r for r in done_rows if r[0]["cache_read_input_tokens"]]
+            if cache and reads:     # the prompt: what rows read from the cache; the rest of their input is the message
+                prompt = sum(r[0]["cache_read_input_tokens"] for r in reads) / len(reads)
+                m0, q = fit_line([(r[2], r[0]["input_tokens"] + r[0]["cache_creation_input_tokens"]) for r in reads], 0)
+            else:                   # input against text length; the prompt's part by its bytes, at the same rate
+                c0, q = fit_line([(r[2], sum(r[0][k] for k in KEYS[:3])) for r in done_rows], prefix_bytes)
+                prompt = min(max(q * prefix_bytes, 0), c0)
+                m0 = c0 - prompt
+            reply = sum(u["output_tokens"] for u in us) / len(us)
+            memo[:] = [len(done_rows), (a, read, out, prompt, m0, q, reply)]
+        return memo[1]
+
+    def row_cost(text_bytes, cached, writes=False):
+        """What a row with a text of that size costs, with the cache or without; writes: it writes the prompt."""
+        a, read, out, prompt, m0, q, reply = shape()
+        msg = m0 + q * text_bytes
+        if not cached:
+            units = prompt + msg
+        elif writes or prompt < MIN_CACHED:
+            units = 1.25 * (prompt + msg)
+        else:
+            units = read * prompt + 1.25 * msg
+        return a * (units + out * reply)
+
+    def coming(sizes):              # the current setting; until a row read the cache, as if each wrote it
+        unread = cache and not any(r[0]["cache_read_input_tokens"] for r in done_rows)
+        return sum(row_cost(b, cache, unread) for b in sizes)
+
+    def hint(sizes, current, past=False):   # when the other cache setting is over 10% cheaper
+        other = sum(row_cost(b, not cache, i == 0) for i, b in enumerate(sizes))
+        if sizes and other < HINT * current:
+            print("hint: %s %s about %s instead of %s%s for these %d rows%s" % (
+                "--no-cache" if cache else "the cache (without --no-cache)", "would have cost" if past else "would cost",
+                usd(other), "" if past else "~", usd(current), len(sizes),
+                "" if past else "; rows already answered are kept if you stop and run it again"), flush=True)
+
+    queue, estimated, running = [(t, o, len(t.encode())) for t, o in todo], False, {}
+
+    def fits(text_bytes):           # may this row start?
+        if nocost:
+            return False
+        if budget is None or not done_rows:
+            return True
+        return cost[0] + coming([b for _, b in running.values()] + [text_bytes]) <= budget
+
+    if alone:
+        t, o, b = queue.pop(0)
         try:
-            done(todo[0][1], ask(cmd, todo[0][0].encode(), todo[0][1]), first=True)
+            done(o, ask(cmd, t.encode(), o, cache), b, is_first=True)
         except Failed as e:
-            sys.exit("cc-ask-batch: %s: %s (stopped before the rest)" % (todo[0][1], e))
+            sys.exit("cc-ask-batch: %s: %s (stopped before the rest)" % (o, e))
+        if done_rows[0][3]:
+            print("first row %s (with the cache write the next rows read from)" % usd(done_rows[0][1]), flush=True)
     with concurrent.futures.ThreadPoolExecutor(jobs) as pool:
-        futs = {pool.submit(ask, cmd, t.encode(), o, cache): o for t, o in todo[1 if cache else 0:]}
-        for f in concurrent.futures.as_completed(futs):
-            try:
-                done(futs[f], f.result())
-            except Failed as e:
-                failed.append(futs[f])
-                print("failed: %s: %s" % (futs[f], str(e)[:300]), flush=True)
-    if misses:
+        while queue or running:
+            while queue and len(running) < jobs and fits(queue[0][2]):
+                t, o, b = queue.pop(0)
+                running[pool.submit(ask, cmd, t.encode(), o, cache)] = o, b
+            if not running:
+                break               # the budget allows no further row
+            fin, _ = concurrent.futures.wait(running, return_when=concurrent.futures.FIRST_COMPLETED)
+            for f in fin:
+                o, b = running.pop(f)
+                try:
+                    done(o, f.result(), b)
+                except Failed as e:
+                    cost[0] += e.cost
+                    failed.append(o)
+                    print("failed: %s: %s" % (o, str(e)[:300]), flush=True)
+            if not estimated and sum(not r[3] for r in done_rows) >= jobs:   # N rows like the rest
+                left = [b for _, b in running.values()] + [b for _, _, b in queue]
+                rest = coming(left)
+                if left:
+                    print("~%s for the %d rows left (from the %d answered and each text's length; %s)" % (
+                        usd(rest), len(left), len(done_rows), "prompt from the cache" if cache else "no cache"),
+                        flush=True)
+                if queue:           # else nothing is left to change
+                    hint([r[2] for r in done_rows] + left, cost[0] + rest)
+                estimated = True
+    if misses and not total["cache_read_input_tokens"]:
+        print("nothing was read from the cache: the prompt is likely under 512 tokens, too short to cache")
+    elif misses:
         print("cache misses (prompt written again): %s" % ", ".join(sorted(misses)[:20]))
-    print("%d answered, %d failed%s. Total: %s (about $%.3f at API prices)" % (
-        len(todo) - len(failed), len(failed), " (run again for those)" if failed else "", line(total), cost[0]))
+    print("%d answered, %d failed%s. Total: %s (about %s at API prices)" % (
+        len(done_rows), len(failed), " (run again for those)" if failed else "", line(total), usd(cost[0])))
+    if done_rows:
+        hint([r[2] for r in done_rows], sum(r[1] for r in done_rows), past=True)
+    if nocost:
+        print("stopped: claude reported no cost for %s, so --budget can't be kept; %d row(s) not started"
+              % (nocost[0], len(queue)))
+        return 3
+    if queue:
+        print("budget reached: %d row(s) not started; run again, with a higher --budget, to go on" % len(queue))
+        return 3
     return 1 if failed else 0
 
 
 def main(prog, argv):
-    model, effort, schema, jobs, cache = "haiku", None, None, 8, True
-    while argv[:1] == ["--no-cache"] or argv[:1] in (["--model"], ["--effort"], ["--schema"], ["-j"]) and len(argv) > 1:
+    model, effort, schema, jobs, cache, budget = "haiku", None, None, 8, True, None
+    while argv[:1] == ["--no-cache"] or argv[:1] in (["--model"], ["--effort"], ["--schema"], ["-j"], ["--budget"]) \
+            and len(argv) > 1:
         if argv[0] == "--no-cache":
             cache = False
             argv = argv[1:]
@@ -153,6 +325,13 @@ def main(prog, argv):
             effort = argv[1]
         elif argv[0] == "--schema":
             schema = argv[1]
+        elif argv[0] == "--budget":
+            try:
+                budget = float(argv[1])
+            except ValueError:
+                budget = 0
+            if prog != "cc-ask-batch" or not budget > 0:
+                sys.exit("%s: --budget takes an amount in USD above 0 (cc-ask-batch only)" % prog)
         elif prog == "cc-ask-batch" and argv[1].isdigit() and 1 <= int(argv[1]) <= 16:
             jobs = int(argv[1])
         else:
@@ -161,7 +340,7 @@ def main(prog, argv):
     batch_mode = prog == "cc-ask-batch"
     if len(argv) != (2 if batch_mode else 3) or argv[0].startswith("-"):
         sys.exit(__doc__.strip() if argv[:1] in (["-h"], ["--help"])
-                 else "usage: " + __doc__.splitlines()[1 if batch_mode else 0])
+                 else "usage: " + "\n".join(__doc__.splitlines()[1:3] if batch_mode else __doc__.splitlines()[:1]))
     prompt, text, out = argv + [None] * (3 - len(argv))
     claude = shutil.which("claude")
     if not claude:
@@ -182,10 +361,10 @@ def main(prog, argv):
         except ValueError as e:
             sys.exit("%s: %s is not JSON: %s" % (prog, schema, e))
     if batch_mode:
-        return batch(cmd, text, jobs, cache)
+        return batch(cmd, text, jobs, cache, budget, os.path.getsize(prompt) + len(cmd[-1] if schema else ""))
     try:
         with open(text, "rb") as fh:
-            u, cost = ask(cmd, fh.read(), out, cache)
+            u, cost, _ = ask(cmd, fh.read(), out, cache)
     except Failed as e:
         sys.exit("cc-ask: %s" % e)
     print("%s: %s (about $%.4f at API prices)" % (out, line(u), cost))

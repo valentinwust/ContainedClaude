@@ -78,7 +78,7 @@ sandbox/bin/cc-ask (+ cc-ask-batch symlink)
                                `claude -p` calls without tools: a prompt file as system prompt, a text as the
                                message, the reply (or --schema JSON) into a file; cc-ask-batch: one per row of
                                a CSV (text, out), the first alone, then -j N (8) threads; 5-minute cache forced
-                               (--no-cache: none)
+                               (--no-cache: none); --budget, an estimate and a hint on the cache setting
 sandbox/shim                   stand-in bound over sbatch/ssh/apptainer/... inside the sandbox (prints advice, exit 126)
 sandbox/hooks/write_guard.py   Claude PreToolUse hook for Write/Edit/...: path-based explanation only
 sandbox/hooks/oom_notice.py    Claude PostToolUse hook for Bash: tells the agent when the session's memory
@@ -668,7 +668,7 @@ text is cheaper than reading them in one session (whose context grows) or in sub
 Code's tools and prompt, and report into the caller's context). `--system-prompt-file` replaces Claude Code's
 prompt, `--tools ""` `--strict-mcp-config` `--setting-sources ""` `--disable-slash-commands` leave nothing else,
 CLAUDE_CODE_PLUGIN_DIRS is dropped (no mods); one turn, no compaction (nothing before the one request). The
-prompt is the cached prefix; the message (the text plus ~600 tokens Claude Code adds) is new each call.
+prompt is the cached prefix; the message (the text plus ~550 tokens Claude Code adds) is new each call.
 `claude -p` writes the 1-hour cache by default (2x input); FORCE_PROMPT_CACHING_5M=1 makes it 5-minute
 (1.25x), as the calls follow one another. --no-cache sets DISABLE_PROMPT_CACHING=1 instead (and drops the
 per-model DISABLE_PROMPT_CACHING_* otherwise): all input at 1x, for a lone call (a write of prompt and message
@@ -685,6 +685,28 @@ No cap works (Haiku 5.5, 2.1.319; the transcript shows a signed thinking block b
 (also 0) and `--settings '{"alwaysThinkingEnabled":false}'` change nothing, `--effort low` only leans (1515 and
 2737 output tokens in two runs), CLAUDE_CODE_MAX_OUTPUT_TOKENS=800 continues to 3200 and then fails without the
 reply, and --max-budget-usd checks after the request: paid for, reply discarded (error_max_budget_usd).
+cc-ask-batch's own --budget: rows start one by one as threads free up (not all queued at once), and a row
+starts only if spent + the predicted cost of the running rows and of this one stays within it, so the overshoot
+is only replies longer than predicted; running rows finish (their input is billed anyway), exit 3, a rerun skips
+the answered rows. With a budget the first row runs alone even without the cache, so a prediction exists before
+the fan-out; until a row has read the cache, each is predicted as if it wrote the prompt (too high, the safe
+side). A row that used tokens but reports cost 0 (a model Claude Code has no price for) stops the batch: the
+budget could not be kept.
+Predictions (budget, the estimate after N (-j) rows like the rest, the hint) price each row by its text's bytes:
+prices() fits input price, read factor and output factor to the answered rows' costs and tokens (Claude Code
+computes the cost from the tokens, so it is exact: live, Haiku 5.5 came out at $0.10/MTok, 0.1x, 5x, also with
+a wrong READ entry), with writes at 1.25x (5-minute cache, every model). Without reads among the rows (no
+cache, or a prompt under 512 tokens) the read factor comes from READ (0.1x; 0.05x Opus 5.5, 0.025x Fable/Mythos
+5.1, keyed on modelUsage's model id); too few rows or no exact fit: READ and 5x. So new models, versions and
+prices need no change, except a new read factor when only --no-cache runs show the model. The prompt's tokens:
+what rows read from the cache, their message (written + uncached) fitted as c0 + q x text bytes; without reads,
+the whole input fitted so and the prompt's part split off by its bytes at the same rate. The reply is the
+average so far, the main error left: 1-7% low on 24 texts of 300-6000 characters (a flat average per row:
+5-17%). The hint compares the other setting for all rows of the run (the first writing the prompt) with spent
++ predicted, and at the end with what the answered rows cost. Under 512 tokens nothing is cached (each call
+only writes); a prompt that is never read back is reported as too short to cache, not as a cache miss per row.
+The threshold is 10% (HINT): --no-cache saves at most 20% of the input (1x against a 1.25x write), and less
+with output, so at 20% the hint could only ever propose the cache.
 
 ---------------------------------------------------------------------------------------------------------------
 ## 6. Version dependencies (what can break when tools update) and where to fix
@@ -700,7 +722,7 @@ reply, and --max-budget-usd checks after the request: paid for, reply discarded 
 | Codex CLI (0.166.0) | its own sandbox = a bwrap + seccomp inner layer; needs /tmp to be a real mount (mount root "/") and, for sockets, `[sandbox_workspace_write] network_access = true` in CODEX_HOME/config.toml (seeded by ensure_state); `[features] daemon_auto_start = false` (seeded: otherwise the TUI copies its binary into packages/ and runs a background server); folder trust `[projects."<path>"] trust_level` (written by codex_trust; Codex can't write config.toml in sessions) | `containedclaude test` runs a command under `codex sandbox` (writes the project, reaches the broker); failure shows there and as "bwrap: Can't mkdir parents ..." or "broker not reachable (Operation not permitted)" in Codex output |
 | Claude Code context and compaction (2.1.319) | context_notice.py: PostToolUse input session_id, transcript_path, agent_id/agent_type (subagents only), tool_response, tool_use_id; user records' message.content (tool_result items with tool_use_id), attachment records; transcript records type assistant + message.usage (input + cache_creation_input + cache_read_input tokens) and message.model; subagent transcripts in <session>/subagents/agent-<id>.jsonl; autoCompactWindow in modelSettings / agent frontmatter / CLAUDE_CODE_AUTO_COMPACT_WINDOW; a fixed 33k buffer below the window | the notice comes late, early or never; test's check uses sample transcripts and can't see that, the occasional manual check in §8 does. `/context` (`claude -p /context`, no model call) shows the current buffer |
 | Claude Code mods (2.1.319) | idle-compact: CLAUDE_CODE_PLUGIN_DIRS read from the settings' env block (inline plugin, hooks module); `turn.start` / `turn.complete` (agentId absent on the main loop, reason), `$.session.usage().context.tokens`, `$.clock.after`, `$.prompt.submit` (works in an idle SDK session; the plugin's UserPromptSubmit command hook sees it, its own `prompt.submit` hooks don't), `$.command.run({ command: "compact", args })` (works in SDK sessions, where `$.session.compact()` refuses), `$.env.get`; Claude Code's own idle compaction still skipping SDK sessions | no notice or no compaction in idle sessions; if Claude Code starts idle-compacting SDK sessions itself, the mod still acts first (50 min) and can stay or go. `claude plugin validate sandbox/mods/idle-compact` and the manual check in §8 |
-| Claude Code one-shot calls (cc-ask, 2.1.319) | `claude -p` flags --system-prompt-file --tools "" --strict-mcp-config --setting-sources "" --disable-slash-commands --no-session-persistence --output-format json --json-schema --effort; result fields result, structured_output, is_error, usage.cache_read/cache_creation_input_tokens; env FORCE_PROMPT_CACHING_5M, DISABLE_PROMPT_CACHING | cc-ask fails or loses its cache hits (from cache 0 on the second call); the manual check in §8 |
+| Claude Code one-shot calls (cc-ask, 2.1.319) | `claude -p` flags --system-prompt-file --tools "" --strict-mcp-config --setting-sources "" --disable-slash-commands --no-session-persistence --output-format json --json-schema --effort; result fields result, structured_output, is_error, usage.cache_read/cache_creation_input_tokens; env FORCE_PROMPT_CACHING_5M, DISABLE_PROMPT_CACHING; total_cost_usd, modelUsage keys (model ids, for READ); cost computed from the tokens (prices() fits on it), cache writes 1.25x | cc-ask fails or loses its cache hits (from cache 0 on the second call); the manual check in §8 |
 | Claude Code agent types, compaction on request, waits on jobs (2.1.319) | cc mod: plugin agents/*.md with name, description, model inherit, autoCompactWindow, experimental.cacheTtl (kept for plugin agents, which drop permissionMode/hooks/mcpServers); usage.cache_creation.ephemeral_1h/5m_input_tokens in subagent transcripts; their prompt is a copy of the general-purpose agent's (function returning "You are an agent for Claude Code..." in the binary); `turn.complete`'s result `text` (the answer), `$.command.run` compact, `$.prompt.submit`; `tool.call` rewriting Bash's `timeout` and `command` and adding `context`, its `agentId`, `$.agent.list()` type `cc:worker`, Bash result timedOutAfterMs; BASH_MAX_TIMEOUT_MS | the types are missing from the Agent tool, a job-worker writes 5-minute cache (ephemeral_5m), a `[[compact]]` reply isn't compacted, or a foreground cc-wait is moved to the background ("did not complete within"); the manual check in §8. After a Claude Code update compare the general-purpose prompt with the agent files' text |
 | util-linux unshare (2.37.4), jobs | --user --map-current-user --mount --propagation private | compat.outer_unshare: falls back to --map-user=UID --map-group=GID (never -r: that maps to root) |
 | apptainer 1.5.5 | exec --userns --containall --workdir --home --pwd --nv --bind --env; build --fakeroot; pull | jobwrap: --userns/--containall/--workdir only if `apptainer exec --help` lists them (compat.likely: if --help is unreadable, pass everything as before); APPTAINER_USERNS=1 forces userns anyway. Security does not depend on these: the surrounding bwrap sandbox decides ro/rw |
@@ -872,7 +894,14 @@ prompt once plus ~600 per further row (20.5k), no cache misses, 12 files; a seco
 reply does only that row; `--schema` (three fields) writes JSON of that shape, still from the cache; a CSV
 without the columns or with an out twice is refused. (20 rows took 13 s with -j 8.) `--no-cache`
 (2026-11-10, 2.1.321): 0 from cache, 0 written, the whole input uncached; a cached call between two such calls
-still reads the prompt from the cache; cc-ask-batch --no-cache answers every row.
+still reads the prompt from the cache; cc-ask-batch --no-cache answers every row. `--budget` (12 rows, -j 3-4):
+$0.0025 cached stopped at $0.0025, $0.003 / $0.004 without the cache at $0.0026 / $0.0038, exit 3, a rerun
+with a higher budget answered the rest. The estimate came after N rows; the hint in a --no-cache run predicted
+$0.0029 with the cache, where the cached run cost $0.0026; a cached run gave none; a 6-token prompt gave
+"too short to cache". With predictions by text length and fitted prices (2026-11-10, 24 texts of 300-6000
+characters, -j 4, the hint printed always via HINT): the estimate after 4-5 rows was 7%, 4.5%, 2%, 1% under the
+total (README prompt with and without the cache, a 6-token prompt with and without); each run's hint for the
+other setting was within 2% of that run's cost; --budget 0.004 stopped at $0.00398.
 
 ---------------------------------------------------------------------------------------------------------------
 ## 9. How to change common things
