@@ -7,15 +7,18 @@ import type { Register } from 'claude-code'
 // server starts (SDK sessions); this works in every session. Values from the session settings' env (the
 // launcher writes them from the [claude] section of the config).
 
-// The person sees only this line; hooks/notice.py (UserPromptSubmit) recognises it and gives the model the
-// notice itself as hidden context (a mod's own hooks never see its own $.prompt.submit). Keep both in step.
-const LINE = (min: number, k: number) =>
-  `Idle for ${min} min with ${k}k tokens: notes, then compaction before the prompt cache expires.`
+// The person sees only this short line (submitted asUser: no "plugin sent a message" frame around it);
+// hooks/notice.py (UserPromptSubmit) recognises it and gives the model the notice itself as hidden context (a
+// mod's own hooks never see its own $.prompt.submit). Keep both in step. The compaction is a bare /compact
+// ($.session.compact refuses in SDK sessions) whose summarizer gets INSTRUCTIONS through the session.compact
+// hook, so the visible command stays short.
+const LINE = (min: number, k: number) => `Idle ${min} min, ${k}k tokens: notes, then compaction.`
 const INSTRUCTIONS =
   'Keep file paths, decisions, open work, job IDs and where notes were written, word for word.'
 
 let timer: { cancel: () => void } | undefined
 let noticed = false
+let compacting = false
 
 const number = async (value: Promise<string | undefined>, fallback: number) => {
   const n = Number(await value)
@@ -39,8 +42,10 @@ export const register: Register = on => {
     if (noticed) {                                         // the answer to the notice: compact now
       noticed = false
       if (e.reason === 'answer') {
-        $.command.run({ command: 'compact', args: INSTRUCTIONS }).catch(err =>
-          $.ui.log(`idle-compact: /compact failed: ${String(err)}`, { to: 'debug' }))
+        compacting = true
+        $.command.run({ command: 'compact' })
+          .catch(err => $.ui.log(`idle-compact: /compact failed: ${String(err)}`, { to: 'debug' }))
+          .finally(() => { compacting = false })
       }
       return result
     }
@@ -51,11 +56,17 @@ export const register: Register = on => {
     timer = $.clock.after(after * 60000, () => {
       timer = undefined
       noticed = true
-      $.prompt.submit({ text: LINE(Math.round(after), Math.round(tokens / 1000)) }).catch(err => {
+      $.prompt.submit({ text: LINE(Math.round(after), Math.round(tokens / 1000)), asUser: true }).catch(err => {
         noticed = false
         $.ui.log(`idle-compact: notice failed: ${String(err)}`, { to: 'debug' })
       })
     })
     return result
+  })
+
+  on('session.compact', async ($, e, next) => {
+    if (e.agentId !== undefined || !compacting) return next(e)
+    compacting = false
+    return next({ ...e, instructions: INSTRUCTIONS })
   })
 }

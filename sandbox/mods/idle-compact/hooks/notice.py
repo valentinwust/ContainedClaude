@@ -5,7 +5,7 @@ import json
 import re
 import sys
 
-LINE = re.compile(r"Idle for \d+ min with \d+k tokens: notes, then compaction before the prompt cache expires\.")
+LINE = re.compile(r"Idle \d+ min, \d+k tokens: notes, then compaction\.")
 NOTICE = ("containedclaude: the prompt cache expires soon, so the conversation will be compacted right after "
           "your reply, and details that live only in the conversation may be lost. Write down what matters "
           "(state, decisions, paths, open work) where you or the user will find it, then reply briefly. "

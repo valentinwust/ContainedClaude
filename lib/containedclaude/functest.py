@@ -551,7 +551,7 @@ def session_checks(td):
         # the idle-compact mod's line (register.ts) gets the hidden notice from its UserPromptSubmit hook
         mod = os.path.join(CLONE, "sandbox", "mods", "idle-compact", "hooks")
         with open(os.path.join(mod, "register.ts")) as fh:
-            line = re.search(r"LINE = .*?\n\s*`([^`]*)`", fh.read()).group(1)
+            line = re.search(r"LINE = [^`]*`([^`]*)`", fh.read()).group(1)
         line = line.replace("${min}", "50").replace("${k}", "210")
         def said(prompt):
             out = subprocess.run([sys.executable, "-I", os.path.join(mod, "notice.py")],

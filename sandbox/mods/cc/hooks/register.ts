@@ -101,7 +101,7 @@ export const register: Register = on => {
     if (keep === undefined || e.reason !== 'answer') return result
     compacting = keep ? `${keep} ${INSTRUCTIONS}` : INSTRUCTIONS
     $.command.run({ command: 'compact' })
-      .then(() => $.prompt.submit({ text: DONE }))
+      .then(() => $.prompt.submit({ text: DONE, asUser: true }))
       .catch(err => $.ui.log(`cc: compaction on request failed: ${String(err)}`, { to: 'debug' }))
       .finally(() => { compacting = undefined })
     return result
