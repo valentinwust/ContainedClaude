@@ -8,6 +8,7 @@ Everything happens in a temporary folder <project>/.cc_selftest_<stamp>/ that is
 Output is meant for humans: sections, one line per check (ok / FAIL / skip), timings, and a summary.
 Exit status 0 if nothing failed.
 """
+import base64
 import glob
 import hashlib
 import json
@@ -16,6 +17,7 @@ import re
 import select
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -485,11 +487,11 @@ def session_checks(td):
             env.pop("CONTAINEDCLAUDE_COMPACT_NOTICE", None)          # the default margin, 25k
             env.pop("CONTAINEDCLAUDE_COMPACT_OFFER", None)           # off until the second part
             hook = os.path.join(CLONE, "sandbox", "hooks", "context_notice.py")
-            def said(agent=None, result="", tool_id="t-own"):
+            def said(agent=None, result="", tool_id="t-own", agent_type="general-purpose"):
                 payload = {"hook_event_name": "PostToolUse", "tool_name": "Read", "session_id": sid,
                            "transcript_path": main_t, "cwd": d, "tool_response": result, "tool_use_id": tool_id}
                 if agent:
-                    payload.update(agent_id=agent, agent_type="general-purpose")
+                    payload.update(agent_id=agent, agent_type=agent_type)
                 out = subprocess.run([sys.executable, "-I", hook], input=json.dumps(payload), env=env,
                                      universal_newlines=True, stdout=subprocess.PIPE, timeout=30).stdout
                 return ((json.loads(out) if out.strip() else {}).get("hookSpecificOutput") or {}).get(
@@ -518,6 +520,39 @@ def session_checks(td):
                 if bool(got) != want or (got and "starts at about %dk" % (67 if model == "m-small" else 167)
                                          not in got):
                     wrong.append("step %d: %r" % (i + 1, got[:60] or "silent"))
+            assert not wrong, "; ".join(wrong)
+            # images: a 2000 x 1000 PNG is ~600k base64 characters but ~2.7k tokens; one written by a parallel
+            # call, one this call's own result (Read's shape): 30k + 5.3k is no notice, 37k + 5.3k is
+            png = base64.b64encode(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR" + struct.pack(">II", 2000, 1000)
+                                   + b"\0" * 450000).decode()
+            for tokens, want in ((30000, False), (37000, True)):
+                usage(main_t, tokens, "m-small")
+                with open(main_t, "a") as fh:
+                    fh.write(json.dumps({"type": "user", "message": {"content": [
+                        {"type": "tool_result", "tool_use_id": "t-img", "content": [
+                            {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                         "data": png}}]}]}}) + "\n")
+                got = said(None, {"type": "image", "file": {"base64": png, "type": "image/png"}})
+                if bool(got) != want:
+                    wrong.append("image at %dk: %r" % (tokens // 1000, got[:60] or "silent"))
+            # a plugin's agent type (the cc mod's cc:worker): its definition's 213k window, found through
+            # CLAUDE_CODE_PLUGIN_DIRS: compaction at 180k, the notice from 155k
+            plugin = os.path.join(d, "plugin-cc")
+            os.makedirs(os.path.join(plugin, ".claude-plugin"))
+            os.makedirs(os.path.join(plugin, "agents"))
+            with open(os.path.join(plugin, ".claude-plugin", "plugin.json"), "w") as fh:
+                json.dump({"name": "cc"}, fh)
+            with open(os.path.join(plugin, "agents", "worker.md"), "w") as fh:
+                fh.write("---\nname: worker\ndescription: \"x\"\nautoCompactWindow: 213000\nexperimental:\n"
+                         "  cacheTtl: 5m\n---\nbody\n")
+            env["CLAUDE_CODE_PLUGIN_DIRS"] = os.pathsep.join([os.path.join(d, "none"), plugin])
+            worker_t = os.path.join(d, sid, "subagents", "agent-w1.jsonl")
+            for tokens, want in ((150000, False), (156000, True)):
+                usage(worker_t, tokens, "m-big")
+                got = said("w1", agent_type="cc:worker")
+                if bool(got) != want or got and "starts at about 180k" not in got:
+                    wrong.append("cc:worker at %dk: %r" % (tokens // 1000, got[:60] or "silent"))
+            del env["CLAUDE_CODE_PLUGIN_DIRS"]
             assert not wrong, "; ".join(wrong)
             # compact_offer 180k on a 1M window: the main session hears once that it may ask for compaction,
             # subagents never; the notice before auto-compaction still comes (offer None = that notice). m-cat

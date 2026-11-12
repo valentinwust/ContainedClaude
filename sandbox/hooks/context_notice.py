@@ -4,10 +4,14 @@ session or a subagent) is within MARGIN tokens of auto-compaction, tell it once 
 write down what a summary would lose. Silent again until its usage drops below that, e.g. after a compaction.
 
 Context used = the newest assistant record's usage in the agent's own transcript (input + cache creation + cache
-read tokens, what Claude Code counts) plus a rough estimate (characters / 3) of what came in after it and goes
-into the next request: tool results of parallel calls and attachments already written, and this tool's result.
+read tokens, what Claude Code counts) plus an estimate of what came in after it and goes into the next request:
+tool results of parallel calls and attachments already written, and this tool's result. Text counts characters
+/ 3. Images and PDFs arrive as base64 (an image of 2000 x 1000 pixels is ~600k characters but ~2.7k tokens), so
+they count what the API charges: width x height / 750 after scaling to 2576 pixels on the long edge and 3.75
+megapixels (within ~10% of the measured cost of 155 images in real sessions), a PDF ~3000 per page.
 Compaction starts BUFFER tokens below the window (/context: "Autocompact buffer 33k"). The window, first match
-wins: CLAUDE_CODE_AUTO_COMPACT_WINDOW, the subagent definition's autoCompactWindow,
+wins: CLAUDE_CODE_AUTO_COMPACT_WINDOW, the subagent definition's autoCompactWindow (agent_definition: also a
+plugin's agents, e.g. the cc mod's workers at 213k),
 modelSettings.<model>.autoCompactWindow in the settings files (local > project > user), the model's context
 window in Claude Code's model catalog (fetched from Anthropic, so it knows new models; at most 200k with
 CLAUDE_CODE_DISABLE_1M_CONTEXT), else 200k (Claude Code's own fallback), or 1M once usage is past 200k.
@@ -15,10 +19,14 @@ CLAUDE_CODE_DISABLE_1M_CONTEXT), else 200k (Claude Code's own fallback), or 1M o
 With CONTAINEDCLAUDE_COMPACT_OFFER (contained sessions), the main session also hears once, past that many tokens
 and before the notice above is due, that it may ask for compaction (the cc mod acts on it).
 """
+import base64
+import binascii
 import glob
 import json
 import os
+import re
 import stat
+import struct
 import sys
 
 BUFFER = 33000                                 # Claude Code compacts this far below the window
@@ -26,6 +34,10 @@ MARGIN = 25000                                 # warn this far before that: room
 DEFAULT_WINDOW, LONG_WINDOW = 200000, 1000000
 TAIL = 65536
 STATE = "/tmp/.containedclaude-context-%d" % os.getuid()     # private /tmp in the sandbox, shared outside
+IMAGE_EDGE, IMAGE_AREA, IMAGE_MAX = 2576, 3750000, 4784       # the API's image limits; tokens = area / 750
+PDF_PAGE = 3000                                # tokens per PDF page (text + page image), rough
+BINARY = ("iVBORw0KGgo", "/9j/", "R0lGOD", "UklGR", "JVBERi")  # base64 of PNG, JPEG, GIF, RIFF (WebP), PDF
+HEADER = 262144                                # base64 characters decoded to find an image's size
 
 
 def state_dir():
@@ -44,14 +56,84 @@ def state_dir():
     return STATE if stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and not st.st_mode & 0o077 else None
 
 
-def added_chars(rec):
-    """Characters of a transcript record that the next request carries: user messages and tool results (not
-    the toolUseResult copy) and attachments (hook output, files). Metadata records count nothing."""
+def image_size(raw):
+    """(width, height) from the header of a PNG, GIF or JPEG, else None."""
+    if raw[:8] == b"\x89PNG\r\n\x1a\n" and len(raw) >= 24:
+        return struct.unpack(">II", raw[16:24])
+    if raw[:6] in (b"GIF87a", b"GIF89a") and len(raw) >= 10:
+        return struct.unpack("<HH", raw[6:10])
+    if raw[:2] == b"\xff\xd8":                    # JPEG: segments up to the frame header (SOFn)
+        i = 2
+        while i + 9 <= len(raw) and raw[i] == 0xFF:
+            marker = raw[i + 1]
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                h, w = struct.unpack(">HH", raw[i + 5:i + 9])
+                return w, h
+            i += 2 + struct.unpack(">H", raw[i + 2:i + 4])[0]
+    return None
+
+
+def image_tokens(size):
+    """What the API charges for an image of `size` pixels; the most an image can cost if the size is unknown."""
+    if not size or min(size) <= 0:
+        return IMAGE_MAX
+    w, h = size
+    scale = min(1.0, IMAGE_EDGE / max(w, h))
+    scale = min(scale, (IMAGE_AREA / (w * h)) ** 0.5)
+    return min(IMAGE_MAX, int(w * h * scale * scale / 750) + 1)
+
+
+def binary_tokens(s):
+    """Tokens of a base64 image or PDF (a string starting with one of BINARY); None for any other string."""
+    if len(s) < 1000 or not s.startswith(BINARY):
+        return None
+    try:
+        raw = base64.b64decode(s if s.startswith("JVBERi") else s[:HEADER - HEADER % 4])
+    except (binascii.Error, ValueError):
+        return None
+    if raw[:4] == b"%PDF":
+        pages = len(re.findall(rb"/Type\s*/Page(?!s)", raw)) or \
+            max([int(n) for n in re.findall(rb"/Count\s+(\d+)", raw)] or [0]) or len(raw) // 50000 + 1
+        return pages * PDF_PAGE
+    if raw[:4] == b"RIFF" and raw[8:12] != b"WEBP":
+        return None
+    return image_tokens(image_size(raw))
+
+
+def weigh(value):
+    """Estimated tokens of a JSON value the next request carries: text at characters / 3, base64 images and
+    PDFs (binary_tokens) at what the API charges for them."""
+    binary = 0
+    def walk(v):
+        nonlocal binary
+        if isinstance(v, str):
+            t = binary_tokens(v)
+            if t is None:
+                return v
+            binary += t
+            return ""
+        if isinstance(v, list):
+            return [walk(x) for x in v]
+        if isinstance(v, dict):
+            return {k: walk(x) for k, x in v.items()}
+        return v
+    return len(json.dumps(walk(value))) // 3 + binary
+
+
+def added_tokens(rec):
+    """Tokens of a transcript record that the next request carries (weigh): user messages and tool results (not
+    the toolUseResult copy) and attachments (hook output, files). Metadata records and the attachments that only
+    record something (RECORD_ONLY) count nothing."""
     if rec.get("type") == "user":
-        return len(json.dumps((rec.get("message") or {}).get("content") or ""))
-    if rec.get("type") == "attachment":
-        return len(json.dumps(rec.get("attachment") or ""))
+        return weigh((rec.get("message") or {}).get("content") or "")
+    if rec.get("type") == "attachment" and (rec.get("attachment") or {}).get("type") not in RECORD_ONLY:
+        return weigh(rec.get("attachment") or "")
     return 0
+
+
+# Attachments that are never sent: a copy of the prompt (up to ~70k tokens, after compactions), the deferred-tool
+# bookkeeping, a hook's raw output (what the model gets is the hook_additional_context record next to it)
+RECORD_ONLY = {"prompt_snapshot", "deferred_tools_record", "hook_success"}
 
 
 def tool_ids(rec):
@@ -60,8 +142,8 @@ def tool_ids(rec):
 
 
 def newest_usage(path):
-    """(tokens, model, chars after, tool ids after): the newest assistant record with usage, and what the
-    records written after it add (added_chars) and which tool results are among them. Reads the file backwards
+    """(tokens, model, tokens after, tool ids after): the newest assistant record with usage, and what the
+    records written after it add (added_tokens) and which tool results are among them. Reads the file backwards
     in chunks."""
     try:
         fh = open(path, "rb")
@@ -96,7 +178,7 @@ def newest_usage(path):
                     if tokens > 0:                           # synthetic messages carry zero usage
                         return tokens, msg.get("model") or "", after, ids
                     continue
-                after += added_chars(rec)
+                after += added_tokens(rec)
                 ids |= tool_ids(rec)
             end = start
     return None
@@ -119,26 +201,47 @@ def positive_int(v):
     return v if v > 0 else None
 
 
-def agent_window(agent_type, dirs):
-    """autoCompactWindow from the frontmatter of the agent definition named agent_type."""
+def frontmatter(path):
+    """Top-level fields of a Markdown file's frontmatter: values as strings, block lists ("- x") as lists;
+    indented (nested) lines are skipped."""
+    try:
+        with open(path) as fh:
+            head = fh.read(8192).split("\n")
+    except OSError:
+        return {}
+    if not head or head[0].strip() != "---":
+        return {}
+    fields, key = {}, None
+    for line in head[1:]:
+        if line.strip() == "---":
+            break
+        if line[:1] in (" ", "\t", "-"):
+            item = line.strip()
+            if item.startswith("- ") and isinstance(fields.get(key), list):
+                fields[key].append(item[2:].strip().strip("'\""))
+            continue
+        key, _, v = line.partition(":")
+        key, v = key.strip(), v.strip()
+        fields[key] = v.strip("'\"") if v else []
+    return fields
+
+
+def agent_definition(agent_type, project, config):
+    """Frontmatter of the definition of agent_type: in the project's and the user's agents folders, or for
+    "<plugin>:<name>" in the agents folder of that plugin among CLAUDE_CODE_PLUGIN_DIRS (the cc mod's
+    workers); {} if none (built-in types)."""
+    plugin, _, name = agent_type.rpartition(":")
+    if plugin:
+        dirs = [os.path.join(p, "agents") for p in (os.environ.get("CLAUDE_CODE_PLUGIN_DIRS") or "").split(os.pathsep)
+                if p and load_json(os.path.join(p, ".claude-plugin", "plugin.json")).get("name") == plugin]
+    else:
+        dirs = [os.path.join(project, ".claude", "agents"), os.path.join(config, "agents")]
     for d in dirs:
         for f in sorted(glob.glob(os.path.join(d, "*.md"))):
-            try:
-                with open(f) as fh:
-                    head = fh.read(8192).split("\n")
-            except OSError:
-                continue
-            if not head or head[0].strip() != "---":
-                continue
-            fields = {}
-            for line in head[1:]:
-                if line.strip() == "---":
-                    break
-                k, _, v = line.partition(":")
-                fields[k.strip()] = v.strip().strip("'\"")
-            if fields.get("name") == agent_type:
-                return positive_int(fields.get("autoCompactWindow"))
-    return None
+            fields = frontmatter(f)
+            if fields.get("name") == name:
+                return fields
+    return {}
 
 
 def catalog_window(config, model):
@@ -162,11 +265,10 @@ def catalog_window(config, model):
     return None
 
 
-def window(model, tokens, agent_type, project):
-    config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+def window(model, tokens, definition, project, config):
     w = positive_int(os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"))
-    if w is None and agent_type:
-        w = agent_window(agent_type, [os.path.join(project, ".claude", "agents"), os.path.join(config, "agents")])
+    if w is None:
+        w = positive_int(definition.get("autoCompactWindow"))
     if w is None:
         for f in (os.path.join(project, ".claude", "settings.local.json"),
                   os.path.join(project, ".claude", "settings.json"), os.path.join(config, "settings.json")):
@@ -198,8 +300,8 @@ def main():
         return 0
     tokens, model, after, ids = found
     if not data.get("tool_use_id") or data.get("tool_use_id") not in ids:     # this result, unless written
-        after += len(json.dumps(data.get("tool_response")))
-    tokens += after // 3
+        after += weigh(data.get("tool_response"))
+    tokens += after
     try:                     # the config's [claude] compact_notice, through the session settings' env; 0 = off
         margin = int(os.environ.get("CONTAINEDCLAUDE_COMPACT_NOTICE", MARGIN))
     except ValueError:
@@ -211,7 +313,9 @@ def main():
     if margin <= 0 and offer <= 0:
         return 0
     project = os.environ.get("CLAUDE_PROJECT_DIR") or data.get("cwd") or os.getcwd()
-    w = window(model, tokens, data.get("agent_type") if agent else None, project)
+    config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    definition = agent_definition(data.get("agent_type") or "", project, config) if agent else {}
+    w = window(model, tokens, definition, project, config)
     d = state_dir()
     if d is None:
         return 0
