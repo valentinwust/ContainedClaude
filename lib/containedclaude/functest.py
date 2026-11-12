@@ -553,6 +553,23 @@ def session_checks(td):
                 if bool(got) != want or got and "starts at about 180k" not in got:
                     wrong.append("cc:worker at %dk: %r" % (tokens // 1000, got[:60] or "silent"))
             del env["CLAUDE_CODE_PLUGIN_DIRS"]
+            # the wording: main session; subagents that can write (built-in or tools with Bash); read-only ones
+            # (Explore, a definition without Write/Edit/Bash)
+            os.makedirs(os.path.join(d, ".claude", "agents"))
+            for name, tools in (("reader", "tools:\n  - Read\n  - Grep\n"), ("runner", "tools: Read, Bash(ls:*)\n")):
+                with open(os.path.join(d, ".claude", "agents", name + ".md"), "w") as fh:
+                    fh.write("---\nname: %s\ndescription: x\n%s---\nbody\n" % (name, tools))
+            usage(main_t, 10000, "m-small")
+            said()
+            for agent, kind, want in ((None, None, "the user will find it"),
+                                      ("g1", "general-purpose", "your caller will find it"),
+                                      ("x1", "runner", "your caller will find it"),
+                                      ("e1", "Explore", "findings so far"), ("r1", "reader", "findings so far")):
+                usage(os.path.join(d, sid, "subagents", "agent-%s.jsonl" % agent) if agent else main_t,
+                      143000 if agent else 43000, "m-big" if agent else "m-small")
+                got = said(agent, agent_type=kind) if agent else said()
+                if want not in got or agent and "no reason to stop" not in got:
+                    wrong.append("wording for %s: %r" % (kind or "main", got[160:240] or "silent"))
             assert not wrong, "; ".join(wrong)
             # compact_offer 180k on a 1M window: the main session hears once that it may ask for compaction,
             # subagents never; the notice before auto-compaction still comes (offer None = that notice). m-cat

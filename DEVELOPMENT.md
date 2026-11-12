@@ -590,7 +590,11 @@ projects/<key>/<session id>/custom-title.json, so session_title.py (SessionStart
 A convenience, not containment: after every tool call (main session and subagents, which run the same hooks)
 the hook tells the calling agent once, via additionalContext, when it is within the margin ([claude]
 compact_notice, 25k; passed as CONTAINEDCLAUDE_COMPACT_NOTICE in the settings' env; 0 = off) of
-auto-compaction, so it can write down what a summary would lose; what it does is left to the agent. Usage =
+auto-compaction, so it can write down what a summary would lose; what it does is left to the agent. Subagents
+are also told that compaction keeps their task, so it is no reason to stop or hand back early (a worker told
+only "may be lost" handed back unfinished, 2026-11-11), and they write for their caller, not the user.
+Read-only ones (Explore, Plan, or a definition whose tools minus disallowedTools have no Write, Edit,
+MultiEdit, NotebookEdit or Bash) put their findings so far in their next message instead. Usage =
 the newest assistant `usage` in the agent's own transcript (subagents: `<session>/subagents/agent-<agent_id>
 .jsonl` next to transcript_path) plus an estimate of what came in after it and goes into the next request:
 user/tool_result content and attachments written since (results of parallel calls; not prompt_snapshot,

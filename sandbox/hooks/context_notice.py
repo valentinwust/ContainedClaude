@@ -2,6 +2,8 @@
 """PostToolUse hook (every tool) inside a ContainedClaude session: when the agent that called the tool (the main
 session or a subagent) is within MARGIN tokens of auto-compaction, tell it once (additionalContext), so it can
 write down what a summary would lose. Silent again until its usage drops below that, e.g. after a compaction.
+Subagents are also told to go on with their task, read-only ones (read_only) to put their findings in their next
+message instead of writing them down.
 
 Context used = the newest assistant record's usage in the agent's own transcript (input + cache creation + cache
 read tokens, what Claude Code counts) plus an estimate of what came in after it and goes into the next request:
@@ -323,7 +325,8 @@ def main():
     trigger = w - BUFFER
     near = margin > 0 and tokens >= trigger - margin
     if once(flag, near):
-        msg = NEAR % (tokens // 1000, max(trigger, 0) // 1000)
+        tail = NEAR_MAIN if not agent else NEAR_READER if read_only(data.get("agent_type"), definition) else NEAR_SUB
+        msg = NEAR % (tokens // 1000, max(trigger, 0) // 1000) + tail
     elif once(flag + ".offer", offer > 0 and tokens >= offer and not near):
         msg = OFFER % (tokens // 1000)
     else:
@@ -333,9 +336,29 @@ def main():
 
 
 NEAR = ("containedclaude: your context holds about %dk tokens and auto-compaction starts at about %dk, so it will "
-        "summarize this conversation soon and details that live only in the conversation may be lost. Consider "
-        "writing down what matters (state, decisions, paths, open work) where you or the user will find it; then "
-        "continue as you judge best.")
+        "summarize this conversation soon and details that live only in the conversation may be lost. ")
+NEAR_MAIN = ("Consider writing down what matters (state, decisions, paths, open work) where you or the user will find "
+             "it; then continue as you judge best.")
+# subagents: a worker told only "may be lost" stopped and handed back unfinished work (2026-11-11)
+GO_ON = "then go on with your task: compaction keeps the task, so it is no reason to stop or hand back early."
+NEAR_SUB = ("Consider writing down what matters (state, decisions, paths, open work) where you or your caller will "
+            "find it, " + GO_ON)
+NEAR_READER = "Put the findings so far in your next message, " + GO_ON      # can't write files
+WRITERS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"}
+READ_ONLY_BUILTIN = {"Explore", "Plan"}       # built-in types without these tools (no definition file)
+
+
+def read_only(agent_type, definition):
+    """Whether the agent can't write files: no Write, Edit or Bash in its definition's tools (minus
+    disallowedTools); without a definition, a built-in read-only type."""
+    if not definition:
+        return agent_type in READ_ONLY_BUILTIN
+    def names(v):
+        items = v if isinstance(v, list) else v.strip("[]").split(",")
+        return {i.strip().strip("'\"").split("(")[0].strip() for i in items if i.strip()}
+    tools = names(definition.get("tools") or "")
+    able = WRITERS if not tools or "*" in tools else tools & WRITERS     # no tools field: all tools
+    return not able - names(definition.get("disallowedTools") or "")
 # cc-compact: sandbox/bin, done by the cc mod (sandbox/mods/cc/hooks/register.ts)
 OFFER = ("containedclaude: your context holds about %dk tokens. If much of it is no longer needed (images and logs "
          "already read, finished subtasks) and a good part of the work remains (more than about 20 tool calls), "
