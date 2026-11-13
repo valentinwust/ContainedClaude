@@ -315,7 +315,12 @@ Broker (outside, broker.Broker.submit):
   with our comment tag or in jobs.tsv. max_jobs: rows + new tasks. max_gpu_jobs / max_total_cpus /
   max_total_mem: concurrent footprint; an array throttled with %N (throttle recorded in jobs.tsv column 6)
   counts at most N tasks.
-- steps: .ipynb -> jupyter nbconvert --execute (output to executed_dir, name = relative path with / -> __),
+- steps: .ipynb -> jupyter nbconvert --execute (output to executed_dir or --executed-dir, which must be in
+  write_paths and must not be the notebook itself; name = relative path with / -> __). The kernel: --kernel NAME
+  (--ExecutePreprocessor.kernel_name), else broker.NB_KERNEL_PICK runs first in the job (`python3 -I`, in the
+  image): the notebook's kernelspec if `jupyter kernelspec list --json` has it, else one with the same language
+  (python3, ir first; one log line says so), else it fails listing the installed ones. Notebooks saved on the
+  host often name a host-only kernel (one per docker image); agents then wrote their own nbconvert wrappers.
   .py -> python, .R -> Rscript, .sh -> bash; cwd = the file's folder. Command mode: argv as given, cwd = client cwd.
 - writes run/jobs/<stamp>_<name>.json (spec) and .sh (batch script with #SBATCH lines built only from validated
   values + `--comment=containedclaude:<sha1(project)[:12]>`), runs `sbatch --parsable`, appends state/jobs.tsv.

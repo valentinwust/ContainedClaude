@@ -852,15 +852,19 @@ def job_checks(td):
               is not None and wait_file(os.path.join(td, "userimg_ok")) and read(os.path.join(td, "userimg_ok")))
         nb = {"cells": [{"cell_type": "code", "metadata": {}, "execution_count": None, "outputs": [],
                          "source": ["open('nb_ok', 'w').write('notebook ran')"]}],
-              "metadata": {"kernelspec": {"name": "python3", "display_name": "Python 3", "language": "python"}},
+              # a kernel only a host has: the job must fall back to the image's python kernel
+              "metadata": {"kernelspec": {"name": "cc-selftest-host-only", "display_name": "Host",
+                                          "language": "python"}},
               "nbformat": 4, "nbformat_minor": 5}
         with open(os.path.join(td, "cc_selftest_nb.ipynb"), "w") as fh:
             json.dump(nb, fh)
         def notebook():
-            must(["cc-run", "--wait", "--name", "cc_test_nb", "--image", img,
+            must(["cc-run", "--wait", "--name", "cc_test_nb", "--image", img, "--executed-dir", td,
                   os.path.join(rel, "cc_selftest_nb.ipynb")], 2400)
             assert wait_file(os.path.join(td, "nb_ok")), "notebook did not run (does the image have jupyter?)"
-            return "executed copy in the jobs' executed folder"
+            assert any(f.endswith("cc_selftest_nb.ipynb") and f != "cc_selftest_nb.ipynb" for f in os.listdir(td)), \
+                "no executed copy in --executed-dir"
+            return "host-only kernel replaced, executed copy in --executed-dir"
         check("notebook in %s" % os.path.basename(img), notebook)
     else:
         line("skip", "your own image / notebooks", "add --image SIF (e.g. the project's analysis image)")

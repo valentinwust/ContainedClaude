@@ -87,7 +87,8 @@ config writable.
 ## Jobs
 Agents learn the rules from `CLAUDE_environment.md` and run cluster work as jobs:
 ```bash
-cc-run analysis.ipynb                           # a notebook as a job
+cc-run analysis.ipynb                           # a notebook as a job (a host-only kernel is replaced by one
+                                                # of the same language in the job; --kernel, --executed-dir)
 cc-run --cpus 16 --mem 64G -- samtools sort -@ 16 -o out.bam in.bam
 cc-run --gpu --image torch.sif train.py         # in an apptainer image (also docker://...)
 cc-run --array 1-96%20 -- bash per_sample.sh

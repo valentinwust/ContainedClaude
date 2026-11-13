@@ -32,6 +32,32 @@ ENV_DENY_RE = re.compile(r"(LD_.*|PATH|BASH_ENV|ENV|IFS|PYTHONHOME|PYTHONSTARTUP
 ARRAY_RE = re.compile(r"(\d+(-\d+)?(:\d+)?)(,\d+(-\d+)?(:\d+)?)*(%\d+)?")
 IMAGE_URI_RE = re.compile(r"(docker|oras|library)://[A-Za-z0-9._/:@+-]{1,300}")
 JOBID_RE = re.compile(r"\d+")
+KERNEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+# A notebook step without --kernel runs this in the job (in the image, where the kernels are): the notebook's
+# kernel if installed there, else one of the same language (python3, ir first), else a refusal that lists them.
+# A notebook saved on the host often names a kernel only the host has (e.g. one for a docker image).
+# argv: the notebook, then the nbconvert command, which gets --ExecutePreprocessor.kernel_name after "nbconvert".
+NB_KERNEL_PICK = r"""
+import json, os, subprocess, sys
+nb, cmd = sys.argv[1], sys.argv[2:]
+try:
+    meta = json.load(open(nb)).get("metadata") or {}
+except (OSError, ValueError):
+    os.execvp(cmd[0], cmd)
+want = (meta.get("kernelspec") or {}).get("name") or ""
+lang = ((meta.get("kernelspec") or {}).get("language") or (meta.get("language_info") or {}).get("name") or "").lower()
+specs = json.loads(subprocess.run(["jupyter", "kernelspec", "list", "--json"], stdout=subprocess.PIPE,
+                                  check=True).stdout)["kernelspecs"]
+if not want or want in specs:
+    os.execvp(cmd[0], cmd)
+same = sorted(n for n, s in specs.items() if (s.get("spec") or {}).get("language", "").lower() == lang)
+if not same:
+    sys.exit("cc-run: the notebook's kernel %s (language %s) is not installed here; installed: %s. Choose one with "
+             "cc-run --kernel NAME." % (want, lang or "not given", ", ".join(sorted(specs)) or "none"))
+k = next((n for n in ("python3", "ir") if n in same), same[0])
+print("cc-run: kernel %s is not installed here; using %s" % (want, k), flush=True)
+os.execvp(cmd[0], cmd[:2] + ["--ExecutePreprocessor.kernel_name=" + k] + cmd[2:])
+"""
 SYS_PYTHON = "/usr/bin/python3" if os.path.exists("/usr/bin/python3") else sys.executable
 
 
@@ -187,7 +213,19 @@ class Broker:
             raise RequestError("nothing to run (give files or a command after --)")
         if args and len(files) > 1:
             raise RequestError("arguments are only allowed with a single file")
-        exec_dir = os.path.join(self.cfg.project, self.cfg.get("jobs", "executed_dir"))
+        notebooks = [f for f in files if str(f).endswith(".ipynb")]
+        kernel, exec_dir = req.get("kernel"), req.get("executed_dir")
+        if (kernel or exec_dir) and not notebooks:
+            raise RequestError("--kernel and --executed-dir are for notebooks (.ipynb files)")
+        if kernel and not KERNEL_RE.fullmatch(str(kernel)):
+            raise RequestError("bad --kernel %r (a kernel name: letters, digits, . _ -)" % kernel)
+        if exec_dir:
+            exec_dir = os.path.realpath(os.path.join(cwd, str(exec_dir)))
+            if not any(exec_dir == w or exec_dir.startswith(w.rstrip(os.sep) + os.sep)
+                       for w in map(os.path.realpath, self.cfg.write_paths())):
+                raise RequestError("--executed-dir %s is not in the project or a write_paths folder" % exec_dir)
+        else:
+            exec_dir = os.path.join(self.cfg.project, self.cfg.get("jobs", "executed_dir"))
         steps = []
         for f in files:
             f = os.path.realpath(os.path.join(cwd, str(f)))
@@ -196,8 +234,14 @@ class Broker:
             rel = os.path.relpath(f, self.cfg.project)
             out = rel.replace(os.sep, "__") if not rel.startswith("..") else os.path.basename(f)
             if f.endswith(".ipynb"):
+                if os.path.join(exec_dir, out) == f:
+                    raise RequestError("--executed-dir %s would overwrite %s itself" % (exec_dir, rel))
                 argv = ["jupyter", "nbconvert", "--to", "notebook", "--execute", "--ExecutePreprocessor.timeout=-1",
                         "--output-dir", exec_dir, "--output", out, f]
+                if kernel:
+                    argv[2:2] = ["--ExecutePreprocessor.kernel_name=" + str(kernel)]
+                else:
+                    argv = ["python3", "-I", "-c", NB_KERNEL_PICK, f] + argv
             elif f.endswith(".py"):
                 argv = ["python", f]
             elif f.endswith(".R"):

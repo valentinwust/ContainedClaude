@@ -5,6 +5,7 @@
   cc-run   [opts] -- command args...                 run a command
       --cpus N --mem 16G --time 04:00:00 --gpu --name NAME --image PATH.sif|docker://...|none
       --array 1-96%20 --after JOBID[,JOBID] --after-any JOBID[,JOBID] --env K=V --cwd DIR --wait [--max MIN]
+      notebooks: --kernel NAME (default: theirs, else one of the same language) --executed-dir DIR
   cc-build [opts] containers/x/x.def [out.sif]       build an image (job, fakeroot, inside the sandbox)
   cc-pull  [opts] docker://... out.sif               pull an image (job)
   cc-wait  [--max MIN] [--interval S] JOBID ...      block until jobs finished; states + log tails
@@ -194,12 +195,18 @@ def main():
             argv, cmd = argv[:i], argv[i + 1:]
         p = argparse.ArgumentParser(prog="cc-run", description="Run files or a command as a sandboxed Slurm job.")
         job_opts(p)
+        p.add_argument("--kernel", help="notebooks: run with this Jupyter kernel (default: the notebook's own; if "
+                       "the job doesn't have it, one installed for the same language)")
+        p.add_argument("--executed-dir", metavar="DIR", help="notebooks: put the executed copies here (default: "
+                       "the project's executed_dir)")
         p.add_argument("target", nargs=argparse.REMAINDER,
                        help="several .ipynb/.py/.R/.sh files (run in order), or ONE file followed by its arguments")
         a = p.parse_args(argv)
         if cmd:
             if a.target:
                 sys.exit("cc-run: give either files or a command after --, not both")
+            if a.kernel or a.executed_dir:
+                sys.exit("cc-run: --kernel and --executed-dir are for notebooks, not a command after --")
             a.name = a.name or job_name(os.path.basename(cmd[0]))
             return submit(a, {"argv": cmd, "kind": "run"})
         if not a.target:
@@ -207,7 +214,8 @@ def main():
         runnable = all(t.endswith((".ipynb", ".py", ".R", ".sh")) for t in a.target)
         files, args = (a.target, []) if runnable else (a.target[:1], a.target[1:])
         a.name = a.name or job_name(os.path.splitext(os.path.basename(files[0]))[0])
-        return submit(a, {"files": files, "args": args, "kind": "run"})
+        return submit(a, {"files": files, "args": args, "kind": "run", "kernel": a.kernel,
+                          "executed_dir": a.executed_dir})
 
     if prog == "cc-build":
         p = argparse.ArgumentParser(prog="cc-build", description="Build an apptainer image as a job (fakeroot, "

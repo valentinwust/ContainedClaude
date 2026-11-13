@@ -40,6 +40,8 @@ via `cc-*`; quick looks (head, grep, small Python) are fine directly. A job runs
 
 ```
 cc-run [opts] notebook.ipynb [more.ipynb ...]   # notebooks headless, in order; first failure stops
+                                                # (--executed-dir DIR; --kernel NAME, else the notebook's
+                                                # kernel, or one of its language if the job lacks it)
 cc-run [opts] script.py arg1 arg2               # .py (python), .R (Rscript), .sh (bash)
 cc-run [opts] -- samtools sort -@ 8 -o out.bam in.bam      # any command
 cc-run --image path/to/image.sif -- python train.py        # inside an apptainer image (also docker://...)
