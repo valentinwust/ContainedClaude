@@ -4,15 +4,18 @@
 Compacts this conversation when the current turn ends, for the main session of a contained Claude session once
 the compaction offer has come (past compact_offer tokens). WHAT TO KEEP goes to the summary along with fixed
 instructions. After the compaction you are prompted to continue. The cc mod does the work (DEVELOPMENT.md
-§5.13): it refuses the command in a subagent and below the offer's size; this only prints what it reads.
+§5.13): it refuses the command in a subagent and below the offer's size, and adds --from-mod where it saw the
+call; without that flag the call went unseen (inside a script, `bash -c`, a function), and this says so.
 """
-import os
 import sys
 
 if sys.argv[1:2] in (["-h"], ["--help"]):
     print(__doc__.strip())
     sys.exit(0)
-keep = " ".join(sys.argv[1:]).strip()
+if sys.argv[1:2] != ["--from-mod"]:
+    print("cc-compact: nothing done: run it as a shell command of its own (not inside a script or bash -c).")
+    sys.exit(1)
+keep = " ".join(" ".join(sys.argv[2:]).split())     # one line: the mod reads to its end
 print("Compaction scheduled for the end of this turn: finish your reply now; you are prompted to continue then.")
 if keep:
     print("Keep: " + keep)          # the cc mod reads it from here (KEEP in register.ts)

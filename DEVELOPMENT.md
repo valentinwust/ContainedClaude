@@ -75,7 +75,7 @@ sandbox/bin/cc (+ cc-run cc-wait cc-jobs cc-cancel cc-log cc-build cc-pull cc-in
                                symlinks)
                                client used INSIDE the sandbox; talks JSON to the broker socket
 sandbox/bin/cc-compact          asks for compaction at the end of the turn: prints the request, which the cc
-                               mod acts on (§5.13)
+                               mod acts on (§5.13); without the mod's --from-mod it does nothing and says so
 sandbox/bin/cc-ask (+ cc-ask-batch symlink)
                                `claude -p` calls without tools: a prompt file as system prompt, a text as the
                                message, the reply (or --schema JSON) into a file; cc-ask-batch: one per row of
@@ -659,8 +659,15 @@ cache again afterwards (5-minute cache: the subagent default, as subagentPromptC
 - Compaction on request (main session): past compact_offer tokens (180000) and before the auto-compaction
   notice is due, context_notice.py tells the main session once (again after a drop below) that it may run
   `cc-compact "<what to keep>"` and end its reply. sandbox/bin/cc-compact only prints the request ("Keep: ..."
-  line); hooks/register.ts's `tool.call` hook on Bash takes it from the main loop (a subagent is refused, and
-  so is a context below 90% of compact_offer: the notice's figure is an estimate), and on the main loop's
+  line); hooks/register.ts's `tool.call` hook on Bash finds cc-compact wherever a command starts in the call
+  (also after `;`, `&&`, `|`, a newline, `then`) and adds --from-mod. Without that flag the script prints
+  "nothing done" and exits 1, so a call the hook can't see (inside a script, `bash -c`) is never told
+  "scheduled" for nothing; the request counts only if the output has the script's SCHEDULED line (a failed
+  `a && cc-compact` has none). (Until 2026-11-13 the hook matched only a call at the start of the command; an
+  agent ran `cd ...; cc-compact "..."` twice, was told "scheduled" and nothing happened. A mod tool instead of
+  the command worked too, but the launcher's allowedMcpServers would have to admit the mod's loopback MCP
+  server and each request cost ~70 more tokens.) The hook refuses a subagent, a background call, compact_offer
+  = 0 and a context below 90% of compact_offer (the notice's figure is an estimate), and on the main loop's
   `turn.complete` (reason answer; an interrupted turn drops it) runs a bare `/compact`; its `session.compact`
   hook hands the summarizer what to keep plus fixed instructions. Then it `$.prompt.submit`s a one-line prompt
   to continue (`asUser`, without the plugin frame; visible, like idle-compact's). So what shows in claude.ai is a folded Bash call, `/compact`
@@ -958,7 +965,10 @@ got the auto-compaction notice at 148k ("starts at about 167k") and the offer on
 compact there, its window being the catalog's 1M. Through a Remote Control server (Haiku, compact_offer = 3000,
 the README read and a few steps to do): the offer came with the first Read; Haiku ran `cc-compact "<keep>"`,
 ended its reply, a bare /compact ran 2 s later, then the continue prompt (shown by Claude Code as "The cc
-plugin sent a message: ..."), and it went on with the remaining steps.
+plugin sent a message: ..."), and it went on with the remaining steps. Chained (2026-11-13, 2.1.323, Haiku 5.5
+through a Remote Control server, compact_offer = 3000): `cd ~/cctest; cc-compact "the code word"` got
+"scheduled" with its Keep line, a bare /compact, the continue prompt, and the code word PELICAN was still
+known; `bash -c 'cc-compact x'` got "nothing done" and nothing was compacted.
 
 ---------------------------------------------------------------------------------------------------------------
 ## 9. How to change common things

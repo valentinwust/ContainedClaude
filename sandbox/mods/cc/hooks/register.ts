@@ -1,22 +1,28 @@
 import type { Register } from 'claude-code'
 
 // ContainedClaude (DEVELOPMENT.md §5.13): compaction when the main session asks for it. Past compact_offer tokens,
-// hooks/context_notice.py tells the main session once that it may run cc-compact (sandbox/bin), which only prints
-// the request (run as typed: a prefix would make it a compound command to approve). When that turn ends, this
-// runs a bare /compact (as the idle-compact mod does: $.session.compact refuses in SDK sessions) whose summarizer
-// gets what to keep through the session.compact hook, so the visible command stays short; then it prompts the
-// agent to go on. Below 90% of compact_offer (room for the notice's estimate) it refuses: too small to pay off.
-// A mod can't compact a subagent (2.1.319); the worker types in agents/ compact at ~180k instead.
-const COMPACT = /^\s*cc-compact(\s|$)/
-const KEEP = '\nKeep: '      // cc-compact's line with what to keep
+// hooks/context_notice.py tells the main session once that it may run cc-compact (sandbox/bin). Wherever a
+// command starts in the Bash call (also after `;`, `&&`, `|`, a newline, `then`), this adds --from-mod, without
+// which the script says it did nothing (a call this can't see: inside a script, `bash -c`), so the agent is
+// never told "scheduled" for nothing; the call stays one command, which needs no approval where a prefix
+// would. The request counts if the script's SCHEDULED line is in the output (a failed `a && cc-compact` has
+// none). When that turn ends, this runs a bare /compact (as the idle-compact mod does: $.session.compact
+// refuses in SDK sessions) whose summarizer gets what to keep through the session.compact hook, so the visible
+// command stays short; then it prompts the agent to go on. Below 90% of compact_offer (room for the notice's
+// estimate) it refuses: too small to pay off. A mod can't compact a subagent (2.1.319); the worker types in
+// agents/ compact at ~180k instead.
+const COMPACT = /(^|[;&|\n(`{]|\b(?:then|do|else)\s)(\s*)cc-compact(?=[\s;&|)`]|$)/g
+const SCHEDULED = 'Compaction scheduled for the end of this turn'     // cc-compact's lines
+const KEEP = '\nKeep: '
 const INSTRUCTIONS =
   'Keep file paths, decisions, open work, job IDs and where notes were written, word for word.'
 const DONE = 'Compacted as you asked. Continue where you left off.'
-const SUBAGENT = 'cc-compact: nothing done: only the main session can be compacted on request.'
-const OFF = 'cc-compact: nothing done: compaction on request is off in this project (compact_offer = 0).'
+const SUBAGENT = 'cc-compact: the command was not run: only the main session can be compacted on request.'
+const OFF = 'cc-compact: the command was not run: compaction on request is off in this project (compact_offer = 0).'
+const BACKGROUND = 'cc-compact: the command was not run: run cc-compact in the foreground.'
 const SMALL = (k: number, min: number) =>
-  `cc-compact: nothing done: the context holds only ${k}k tokens; below about ${min}k compaction costs more ` +
-  'than it saves. Carry on.'
+  `cc-compact: the command was not run: the context holds only ${k}k tokens; below about ${min}k compaction ` +
+  'costs more than it saves. Carry on.'
 
 // Waits on jobs (cc-wait, cc-run --wait, cc-log -f) that the agent runs in the foreground: Bash's timeout (2
 // minutes unless set) would move them to the background mid-run, and the agent then works around that (sleep,
@@ -55,16 +61,20 @@ export const register: Register = on => {
   let compacting: string | undefined  // the instructions for the /compact this mod runs
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    if (COMPACT.test(e.command)) {
+    const command = e.command.replace(COMPACT, '$1$2cc-compact --from-mod')
+    if (command !== e.command) {
       if (e.agentId !== undefined) return { deny: SUBAGENT }
+      if (e.run_in_background) return { deny: BACKGROUND }
       const offer = Number(await $.env.get('CONTAINEDCLAUDE_COMPACT_OFFER'))
       if (!Number.isFinite(offer) || offer <= 0) return { deny: OFF }
       const tokens = (await $.session.usage()).context.tokens ?? 0
       if (tokens < offer * 0.9) return { deny: SMALL(Math.round(tokens / 1000), Math.round(offer * 0.9 / 1000)) }
-      const ran = await next(e)
+      const ran = await next({ ...e, command })
       const text = ran.text ?? ''
-      if (ran.deny === undefined && !ran.isError)
-        asked = text.includes(KEEP) ? text.slice(text.indexOf(KEEP) + KEEP.length).trim() : ''
+      if (ran.deny === undefined && text.includes(SCHEDULED)) {
+        const at = text.indexOf(KEEP, text.indexOf(SCHEDULED))
+        asked = at < 0 ? '' : text.slice(at + KEEP.length).split('\n')[0].trim()
+      }
       return ran
     }
     let worker = false
