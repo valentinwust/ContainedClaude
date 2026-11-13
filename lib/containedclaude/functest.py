@@ -589,7 +589,8 @@ def session_checks(td):
                 usage(path, tokens, model[0] if model else "m-huge")
                 got = said(agent)
                 if (want is None and "auto-compaction starts" not in got) or \
-                        (want is not None and ("cc-compact" in got) != want or want is False and got):
+                        (want is not None and ("cc-compact" in got) != want or want is False and got) or \
+                        want and "auto-compaction comes at about 967k" not in got:        # 1M window - BUFFER
                     wrong.append("offer step %d: %r" % (i + 1, got[:60] or "silent"))
             assert not wrong, "; ".join(wrong)
         finally:

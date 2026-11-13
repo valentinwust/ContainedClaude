@@ -19,7 +19,8 @@ window in Claude Code's model catalog (fetched from Anthropic, so it knows new m
 CLAUDE_CODE_DISABLE_1M_CONTEXT), else 200k (Claude Code's own fallback), or 1M once usage is past 200k.
 
 With CONTAINEDCLAUDE_COMPACT_OFFER (contained sessions), the main session also hears once, past that many tokens
-and before the notice above is due, that it may ask for compaction (the cc mod acts on it).
+and before the notice above is due, that it may ask for compaction (the cc mod acts on it), with where
+auto-compaction comes.
 """
 import base64
 import binascii
@@ -328,7 +329,7 @@ def main():
         tail = NEAR_MAIN if not agent else NEAR_READER if read_only(data.get("agent_type"), definition) else NEAR_SUB
         msg = NEAR % (tokens // 1000, max(trigger, 0) // 1000) + tail
     elif once(flag + ".offer", offer > 0 and tokens >= offer and not near):
-        msg = OFFER % (tokens // 1000)
+        msg = OFFER % (tokens // 1000, max(trigger, 0) // 1000)
     else:
         return 0
     json.dump({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": msg}}, sys.stdout)
@@ -360,7 +361,9 @@ def read_only(agent_type, definition):
     able = WRITERS if not tools or "*" in tools else tools & WRITERS     # no tools field: all tools
     return not able - names(definition.get("disallowedTools") or "")
 # cc-compact: sandbox/bin, done by the cc mod (sandbox/mods/cc/hooks/register.ts)
-OFFER = ("containedclaude: your context holds about %dk tokens. If much of it is no longer needed (images and logs "
+# "not full": without the distance an agent took the offer for a warning that the context was nearly full
+OFFER = ("containedclaude: your context holds about %dk tokens. It is not full (auto-compaction comes at about "
+         "%dk), but every request sends all of it. If much of it is no longer needed (images and logs "
          "already read, finished subtasks) and a good part of the work remains (more than about 20 tool calls), "
          "you can have it compacted: write down what matters, run `cc-compact \"<what the summary must keep>\"`, "
          "and end your reply. The conversation is compacted when your turn ends, and you are prompted to "

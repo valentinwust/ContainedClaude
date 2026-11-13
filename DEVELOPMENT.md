@@ -663,7 +663,8 @@ cache again afterwards (5-minute cache: the subagent default, as subagentPromptC
   conversation's), so the fixed window is all subagents get.
 - Compaction on request (main session): past compact_offer tokens (180000) and before the auto-compaction
   notice is due, context_notice.py tells the main session once (again after a drop below) that it may run
-  `cc-compact "<what to keep>"` and end its reply. sandbox/bin/cc-compact only prints the request ("Keep: ..."
+  `cc-compact "<what to keep>"` and end its reply. It names where auto-compaction comes and says the context
+  is not full (without that, an agent took the offer for a warning that it was nearly full, 2026-11-13). sandbox/bin/cc-compact only prints the request ("Keep: ..."
   line); hooks/register.ts's `tool.call` hook on Bash finds cc-compact wherever a command starts in the call
   (also after `;`, `&&`, `|`, a newline, `then`) and adds --from-mod. Without that flag the script prints
   "nothing done" and exits 1, so a call the hook can't see (inside a script, `bash -c`) is never told
@@ -973,7 +974,10 @@ ended its reply, a bare /compact ran 2 s later, then the continue prompt (shown 
 plugin sent a message: ..."), and it went on with the remaining steps. Chained (2026-11-13, 2.1.323, Haiku 5.5
 through a Remote Control server, compact_offer = 3000): `cd ~/cctest; cc-compact "the code word"` got
 "scheduled" with its Keep line, a bare /compact, the continue prompt, and the code word PELICAN was still
-known; `bash -c 'cc-compact x'` got "nothing done" and nothing was compacted.
+known; `bash -c 'cc-compact x'` got "nothing done" and nothing was compacted. The offer with the distance
+(2026-11-13, `claude -p`, Haiku 5.5, compact_offer = 3000): quoted word for word, "about 25k tokens. It is
+not full (auto-compaction comes at about 967k)". Not on a fresh session's first tool call: its usage is not in
+the transcript yet when the hook runs (the hook stays silent then; the offer comes at 180k, long after).
 
 ---------------------------------------------------------------------------------------------------------------
 ## 9. How to change common things
