@@ -18,9 +18,10 @@ modelSettings.<model>.autoCompactWindow in the settings files (local > project >
 window in Claude Code's model catalog (fetched from Anthropic, so it knows new models; at most 200k with
 CLAUDE_CODE_DISABLE_1M_CONTEXT), else 200k (Claude Code's own fallback), or 1M once usage is past 200k.
 
-With CONTAINEDCLAUDE_COMPACT_OFFER (contained sessions), the main session also hears once, past that many tokens
+With CONTAINEDCLAUDE_COMPACT_OFFER (contained sessions), the main session also hears, past that many tokens
 and before the notice above is due, that it may ask for compaction (the cc mod acts on it), with where
-auto-compaction comes.
+auto-compaction comes; with CONTAINEDCLAUDE_COMPACT_OFFER_EVERY again each time the context has grown by that much
+(climbed: the flag file holds the step said last).
 """
 import base64
 import binascii
@@ -313,6 +314,10 @@ def main():
         offer = 0 if agent else int(os.environ.get("CONTAINEDCLAUDE_COMPACT_OFFER") or 0)
     except ValueError:
         offer = 0
+    try:                     # [claude] compact_offer_every: repeat it this many tokens later; 0 = once
+        every = max(int(os.environ.get("CONTAINEDCLAUDE_COMPACT_OFFER_EVERY") or 0), 0)
+    except ValueError:
+        every = 0
     if margin <= 0 and offer <= 0:
         return 0
     project = os.environ.get("CLAUDE_PROJECT_DIR") or data.get("cwd") or os.getcwd()
@@ -328,10 +333,14 @@ def main():
     if once(flag, near):
         tail = NEAR_MAIN if not agent else NEAR_READER if read_only(data.get("agent_type"), definition) else NEAR_SUB
         msg = NEAR % (tokens // 1000, max(trigger, 0) // 1000) + tail
-    elif once(flag + ".offer", offer > 0 and tokens >= offer and not near):
-        msg = OFFER % (tokens // 1000, max(trigger, 0) // 1000)
     else:
-        return 0
+        # the offer's step: 1 past compact_offer, one more every `every` tokens; 0 below it or once near
+        step = 0 if offer <= 0 or tokens < offer or near else 1 + ((tokens - offer) // every if every else 0)
+        if not climbed(flag + ".offer", step):
+            return 0
+        nxt = offer + step * every
+        msg = OFFER % (tokens // 1000, max(trigger, 0) // 1000) + (
+            AGAIN % (nxt // 1000) if every and nxt < trigger - margin else ONCE)
     json.dump({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": msg}}, sys.stdout)
     return 0
 
@@ -367,7 +376,9 @@ OFFER = ("containedclaude: your context holds about %dk tokens. It is not full (
          "already read, finished subtasks) and a good part of the work remains (more than about 20 tool calls), "
          "you can have it compacted: write down what matters, run `cc-compact \"<what the summary must keep>\"`, "
          "and end your reply. The conversation is compacted when your turn ends, and you are prompted to "
-         "continue. Otherwise carry on; this notice comes once.")
+         "continue. Otherwise carry on")
+AGAIN = "; you hear this again at about %dk."      # repeats: the cost of a large context keeps growing
+ONCE = "."
 
 
 def once(flag, due):
@@ -387,6 +398,32 @@ def once(flag, due):
     except OSError:
         return False
     return True
+
+
+def climbed(flag, step):
+    """True when `step` is above the one the flag file remembers (then remembered); a lower step is remembered
+    as is (after a compaction the steps count up again), 0 removes the flag. False if the flag can't be
+    written, as the offer would otherwise repeat at every call."""
+    try:
+        with open(flag) as fh:
+            said = int(fh.read())
+    except (OSError, ValueError):
+        said = 0
+    if step == said:
+        return False
+    if step == 0:
+        try:
+            os.unlink(flag)
+        except OSError:
+            pass
+        return False
+    try:
+        fd = os.open(flag, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(str(step))
+    except OSError:
+        return False
+    return step > said
 
 
 if __name__ == "__main__":

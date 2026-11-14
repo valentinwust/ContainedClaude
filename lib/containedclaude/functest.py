@@ -335,6 +335,8 @@ def session_checks(td):
             "compact_notice not passed: %r" % env
         assert env.get("CONTAINEDCLAUDE_COMPACT_OFFER") == (cfg.get("claude", "compact_offer") or "0"), \
             "compact_offer not passed: %r" % env
+        assert env.get("CONTAINEDCLAUDE_COMPACT_OFFER_EVERY") == \
+            (cfg.get("claude", "compact_offer_every") or "0"), "compact_offer_every not passed: %r" % env
         mod = os.path.join(CLONE, "sandbox", "mods", "idle-compact")
         cc = os.path.join(CLONE, "sandbox", "mods", "cc")
         dirs = (env.get("CLAUDE_CODE_PLUGIN_DIRS") or "").split(os.pathsep)
@@ -573,32 +575,43 @@ def session_checks(td):
             assert not wrong, "; ".join(wrong)
             # compact_offer 180k on a 1M window: the main session hears once that it may ask for compaction,
             # subagents never; the notice before auto-compaction still comes (offer None = that notice). m-cat
-            # has no modelSettings but a 1M window in Claude Code's model catalog: no notice at 150k
+            # has no modelSettings but a 1M window in Claude Code's model catalog: no notice at 150k. Then with
+            # compact_offer_every 100k: again at each step (a jump says it once, a drop below a step resets it),
+            # not past the notice's point. want: False silent, None the notice, text: how the offer ends
             env["CONTAINEDCLAUDE_COMPACT_OFFER"] = "180000"
+            env["CONTAINEDCLAUDE_COMPACT_OFFER_EVERY"] = "0"
             with open(os.path.join(d, "settings.json"), "w") as fh:
                 json.dump({"modelSettings": {"m-huge": {"autoCompactWindow": 1000000}}}, fh)
             os.makedirs(os.path.join(d, "cache", "model-catalog"))
             with open(os.path.join(d, "cache", "model-catalog", "org-cc.json"), "w") as fh:
                 json.dump({"version": 2, "catalog": {"config": {"models": [
                     {"id": "m-cat", "runtime": {"max_input_tokens": 1000000}}]}}}, fh)
-            offers = [(main_t, 170000, None, False), (main_t, 185000, None, True), (main_t, 190000, None, False),
-                      (sub_t, 190000, "a1", False), (main_t, 60000, None, False), (main_t, 185000, None, True),
+            once_ = "Otherwise carry on."
+            offers = [(main_t, 170000, None, False), (main_t, 185000, None, once_), (main_t, 290000, None, False),
+                      (sub_t, 190000, "a1", False), (main_t, 60000, None, False), (main_t, 185000, None, once_),
                       (main_t, 950000, None, None), (main_t, 60000, None, False),
-                      (main_t, 150000, None, False, "m-cat"), (main_t, 185000, None, True, "m-cat")]
-            for i, (path, tokens, agent, want, *model) in enumerate(offers):
+                      (main_t, 150000, None, False, "m-cat"), (main_t, 185000, None, once_, "m-cat")]
+            every = [(main_t, 60000, None, False), (main_t, 185000, None, "again at about 280k."),
+                     (main_t, 250000, None, False), (main_t, 285000, None, "again at about 380k."),
+                     (main_t, 520000, None, "again at about 580k."), (main_t, 300000, None, False),
+                     (main_t, 390000, None, "again at about 480k."), (main_t, 930000, None, once_),
+                     (main_t, 950000, None, None)]
+            for i, (path, tokens, agent, want, *model) in enumerate(offers + every):
+                if i == len(offers):
+                    env["CONTAINEDCLAUDE_COMPACT_OFFER_EVERY"] = "100000"
                 usage(path, tokens, model[0] if model else "m-huge")
                 got = said(agent)
-                if (want is None and "auto-compaction starts" not in got) or \
-                        (want is not None and ("cc-compact" in got) != want or want is False and got) or \
-                        want and "auto-compaction comes at about 967k" not in got:        # 1M window - BUFFER
-                    wrong.append("offer step %d: %r" % (i + 1, got[:60] or "silent"))
+                if (want is None and "auto-compaction starts" not in got) or (want is False and got) or \
+                        want and not (got.endswith(want) and           # 967k: the 1M window - BUFFER
+                                      "auto-compaction comes at about 967k" in got and "cc-compact" in got):
+                    wrong.append("offer step %d: %r" % (i + 1, got[-60:] or "silent"))
             assert not wrong, "; ".join(wrong)
         finally:
             shutil.rmtree(d, ignore_errors=True)
             for f in glob.glob("/tmp/.containedclaude-context-%d/%s.*" % (os.getuid(), sid)):
                 os.unlink(f)
         return "warns once 25k before compaction, again after a drop; offers compaction to the main session " \
-               "(%d steps)" % (len(steps) + len(offers))
+               "and again every 100k (%d steps)" % (len(steps) + len(offers) + len(every))
     check("notice close to auto-compaction (context_notice)", context_notice)
     def idle_notice():
         # the idle-compact mod's line (register.ts) gets the hidden notice from its UserPromptSubmit hook

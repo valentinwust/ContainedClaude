@@ -825,6 +825,7 @@ def claude_env(cfg, user):
     mods = [os.path.join(CLONE, "sandbox", "mods", "cc")]
     env = {"CONTAINEDCLAUDE_COMPACT_NOTICE": cfg.get("claude", "compact_notice") or "0",
            "CONTAINEDCLAUDE_COMPACT_OFFER": cfg.get("claude", "compact_offer") or "0",
+           "CONTAINEDCLAUDE_COMPACT_OFFER_EVERY": cfg.get("claude", "compact_offer_every") or "0",
            "BASH_MAX_TIMEOUT_MS": "3420000"}
     if cfg.bool("claude", "idle_compact"):
         mods.append(os.path.join(CLONE, "sandbox", "mods", "idle-compact"))

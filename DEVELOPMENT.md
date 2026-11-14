@@ -88,8 +88,8 @@ sandbox/hooks/oom_notice.py    Claude PostToolUse hook for Bash: tells the agent
 sandbox/hooks/peer_guard.py    Claude UserPromptSubmit + PreToolUse SendMessage hook: messages between sessions
                                only within the project; PostToolUse ListAgents: which are reachable (§5.10)
 sandbox/hooks/context_notice.py  Claude PostToolUse hook for every tool: tells an agent once when it nears
-                               auto-compaction and, past compact_offer, the main session that it may ask
-                               for compaction (§5.11, §5.13)
+                               auto-compaction and, past compact_offer (then every compact_offer_every),
+                               the main session that it may ask for compaction (§5.11, §5.13)
 sandbox/hooks/session_title.py  Claude SessionStart hook on resume: gives a session its stored title back (§5.10)
 lib/containedclaude/host_extras.py  add|remove|status: the extras (install.sh --extras) in the user's own
                                settings.json ($CLAUDE_CONFIG_DIR or ~/.claude): context_notice.py, the
@@ -662,9 +662,16 @@ cache again afterwards (5-minute cache: the subagent default, as subagentPromptC
   so setting either would override it. A mod can't compact a subagent ($.session.compact is the main
   conversation's), so the fixed window is all subagents get.
 - Compaction on request (main session): past compact_offer tokens (180000) and before the auto-compaction
-  notice is due, context_notice.py tells the main session once (again after a drop below) that it may run
-  `cc-compact "<what to keep>"` and end its reply. It names where auto-compaction comes and says the context
-  is not full (without that, an agent took the offer for a warning that it was nearly full, 2026-11-13). sandbox/bin/cc-compact only prints the request ("Keep: ..."
+  notice is due, context_notice.py tells the main session that it may run `cc-compact "<what to keep>"` and
+  end its reply, and again each time the context has grown by compact_offer_every (100000; 0 = once): 280k,
+  380k, ... (its flag file holds the step said last; a jump past several steps says it once, a drop below
+  compact_offer starts over). Each offer names the next one ("you hear this again at about 380k") and where
+  auto-compaction comes, and says the context is not full (without that, an agent took the offer for a
+  warning that it was nearly full, 2026-11-13). Why repeat: since 2026-11-10 two main sessions ran 31 and 45
+  requests past 300k without compacting (peaks ~355k); a compaction there (~130k input-token equivalents:
+  reading 300k at 0.1, ~8k summary output at 5, ~30k rewritten at 2) is repaid by ~27k less per request
+  (270k at 0.1) after about 5 requests, 15-20 with files read again. sandbox/bin/cc-compact only prints the
+  request ("Keep: ..."
   line); hooks/register.ts's `tool.call` hook on Bash finds cc-compact wherever a command starts in the call
   (also after `;`, `&&`, `|`, a newline, `then`) and adds --from-mod. Without that flag the script prints
   "nothing done" and exits 1, so a call the hook can't see (inside a script, `bash -c`) is never told
