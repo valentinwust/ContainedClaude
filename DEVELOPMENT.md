@@ -811,8 +811,8 @@ Predictions (budget, the estimate after N (-j) rows like the rest, the hint) pri
 prices() fits input price, read factor and output factor to the answered rows' costs and tokens (Claude Code
 computes the cost from the tokens, so it is exact: live, Haiku 5.5 came out at $0.10/MTok, 0.1x, 5x, also with
 a wrong READ entry), with writes at 1.25x (5-minute cache, every model). Without reads among the rows (no
-cache, or a prompt under 512 tokens) the read factor comes from READ (0.1x; 0.05x Opus 5.5, 0.025x Fable/Mythos
-5.1, keyed on modelUsage's model id); too few rows or no exact fit: READ and 5x. So new models, versions and
+cache, or a prompt under 512 tokens) the read factor comes from READ (by model class, each with its newest
+factor: 0.025x Fable/Mythos, 0.05x Opus and Sonnet, 0.1x otherwise; found in modelUsage's model id); too few rows or no exact fit: READ and 5x. So new models, versions and
 prices need no change, except a new read factor when only --no-cache runs show the model. The prompt's tokens:
 what rows read from the cache, their message (written + uncached) fitted as c0 + q x text bytes; without reads,
 the whole input fitted so and the prompt's part split off by its bytes at the same rate. The reply is the

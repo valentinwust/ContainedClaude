@@ -53,7 +53,10 @@ KEYS = ("cache_read_input_tokens", "cache_creation_input_tokens", "input_tokens"
 # Pricing for the estimate and the hint, where the batch's own rows can't show it (prices()): cache reads cost
 # 0.1x the input price, less on these models; output 5x. Cache writes cost 1.25x (5-minute cache) on every model.
 # Prefixes under 512 tokens aren't cached.
-READ = (("opus-5-5", 0.05), ("fable-5-1", 0.025), ("mythos-5-1", 0.025))
+# By model class, with the class's newest factor (checked 2026-11-15 against Claude Code's costs and
+# platform.claude.com/docs/en/about-claude/pricing): a new version inherits it. Too low for the versions before
+# each class's drop (Fable/Mythos 5, Opus and Sonnet 5 and older: 0.1).
+READ = (("fable", 0.025), ("mythos", 0.025), ("opus", 0.05), ("sonnet", 0.05))
 MIN_CACHED = 512
 HINT = 0.9                          # the hint when the other setting costs less than this x the current
 DISABLE = tuple("DISABLE_PROMPT_CACHING" + m for m in ("", "_HAIKU", "_SONNET", "_OPUS", "_FABLE", "_MYTHOS"))
