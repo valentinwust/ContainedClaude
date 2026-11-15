@@ -2,11 +2,11 @@
 """Quality-of-life features for Claude Code OUTSIDE the sandbox (install.sh --extras, uninstall.sh), in the
 user's own settings.json ($CLAUDE_CONFIG_DIR or ~/.claude), run from this clone:
 - the notice before auto-compaction (hook sandbox/hooks/context_notice.py),
-- compaction before an idle session's prompt cache expires (mod sandbox/mods/idle-compact, through
-  env.CLAUDE_CODE_PLUGIN_DIRS),
+- compaction before an idle session's prompt cache expires (mod sandbox/mods/compaction, through
+  env.CLAUDE_CODE_PLUGIN_DIRS; its compaction on request stays off outside the sandbox),
 - the [claude] values of this clone's site.ini for both (env CONTAINEDCLAUDE_*), written at install time.
-Ours is recognised by the hook script's and the mod's path ending, so `add` adds it once and replaces what an
-earlier run or another clone path wrote; `remove` takes it out again and leaves everything else as it was.
+Ours is recognised by the hook script's path ending and by a mod's place (any folder in a sandbox/mods), so
+`add` adds it once and replaces what an earlier run or another clone path wrote; `remove` takes it out again and leaves everything else as it was.
 
   host_extras.py add|remove|status      status: installed (0), not installed (1), outdated (2)
 """
@@ -19,8 +19,8 @@ sys.path.insert(0, os.path.join(CLONE, "lib"))
 from containedclaude.config import site_config      # noqa: E402
 
 HOOKS = [("PostToolUse", "*", "context_notice.py")]          # (event, matcher, script in sandbox/hooks)
-MOD_TAIL = os.sep + os.path.join("sandbox", "mods", "idle-compact")
-MOD = CLONE + MOD_TAIL
+MODS_TAIL = os.sep + os.path.join("sandbox", "mods")       # a clone's mods folder
+MOD = os.path.join(CLONE, "sandbox", "mods", "compaction")
 VALUES = {"CONTAINEDCLAUDE_COMPACT_NOTICE": "compact_notice",          # env name: [claude] key
           "CONTAINEDCLAUDE_IDLE_COMPACT_AFTER": "idle_compact_after",
           "CONTAINEDCLAUDE_IDLE_COMPACT_MIN_TOKENS": "idle_compact_min_tokens"}
@@ -80,7 +80,7 @@ def applied(data, add):
         data.pop("hooks")
     env = data.setdefault("env", {})
     dirs = [d for d in str(env.get("CLAUDE_CODE_PLUGIN_DIRS") or "").split(os.pathsep)
-            if d and not d.rstrip(os.sep).endswith(MOD_TAIL)]
+            if d and not os.path.dirname(d.rstrip(os.sep)).endswith(MODS_TAIL)]
     for name in VALUES:
         env.pop(name, None)
     if add:
@@ -128,7 +128,8 @@ def status():
     if applied(data, True) == data:
         print("installed")
         return 0
-    print("outdated (another clone path or other site.ini values): run install.sh --extras again")
+    print("outdated (another clone path, a mod folder that moved or other site.ini values): run install.sh "
+          "--extras again")
     return 2
 
 

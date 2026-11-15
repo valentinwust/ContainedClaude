@@ -329,7 +329,8 @@ def session_checks(td):
             except ValueError:
                 continue
             raise AssertionError("settings Claude Code does not read were accepted: %r" % bad)
-        # [claude] through the env block: the notice margin, and the idle-compact mod after the user's own folders
+        # [claude] through the env block: the notice margin and offer, the two mods after the user's own folders,
+        # idle compaction's values only with idle_compact (without them the compaction mod runs no timer)
         env = st.get("env") or {}
         assert env.get("CONTAINEDCLAUDE_COMPACT_NOTICE") == (cfg.get("claude", "compact_notice") or "0"), \
             "compact_notice not passed: %r" % env
@@ -337,20 +338,23 @@ def session_checks(td):
             "compact_offer not passed: %r" % env
         assert env.get("CONTAINEDCLAUDE_COMPACT_OFFER_EVERY") == \
             (cfg.get("claude", "compact_offer_every") or "0"), "compact_offer_every not passed: %r" % env
-        mod = os.path.join(CLONE, "sandbox", "mods", "idle-compact")
+        mod = os.path.join(CLONE, "sandbox", "mods", "compaction")
         cc = os.path.join(CLONE, "sandbox", "mods", "cc")
         dirs = (env.get("CLAUDE_CODE_PLUGIN_DIRS") or "").split(os.pathsep)
-        assert (mod in dirs) == cfg.bool("claude", "idle_compact"), "idle-compact mod: %r" % env
-        assert cc in dirs, "cc mod not loaded: %r" % env
-        for f in ((mod, "hooks", "register.ts"), (cc, "hooks", "register.ts"), (cc, "agents", "worker.md"),
-                  (cc, "agents", "job-worker.md")):
+        assert cc in dirs and mod in dirs, "mods not loaded: %r" % env
+        idle = cfg.bool("claude", "idle_compact")
+        for name, key in (("CONTAINEDCLAUDE_IDLE_COMPACT_AFTER", "idle_compact_after"),
+                          ("CONTAINEDCLAUDE_IDLE_COMPACT_MIN_TOKENS", "idle_compact_min_tokens")):
+            assert env.get(name) == (cfg.get("claude", key) if idle else None), "%s: %r" % (name, env)
+        for f in ((mod, "hooks", "register.ts"), (mod, "hooks", "notice.py"), (cc, "hooks", "register.ts"),
+                  (cc, "agents", "worker.md"), (cc, "agents", "job-worker.md")):
             assert os.path.isfile(os.path.join(*f)), "missing: %s" % os.path.join(*f)
         own = project.session_settings(cfg, {"env": {"CLAUDE_CODE_PLUGIN_DIRS": "/x", "K": "v"}})["env"]
         assert own["K"] == "v" and own["CLAUDE_CODE_PLUGIN_DIRS"].split(os.pathsep)[0] == "/x", \
             "the user's own env entries were not kept: %r" % own
-        return "hooks, RemoteTrigger denied, %s, [claude] values, cc mod%s; the user's own settings kept" % (
-            "no MCP servers" if no_mcp else "MCP servers from the config",
-            ", idle-compact mod" if mod in dirs else "")
+        return "hooks, RemoteTrigger denied, %s, [claude] values, cc and compaction mods (idle compaction %s); " \
+            "the user's own settings kept" % ("no MCP servers" if no_mcp else "MCP servers from the config",
+                                              "on" if idle else "off")
     check("the launcher's settings reach every Claude process", launcher_settings if cfgdir else lambda: False)
     if ARGS.get("unknown_folder") and cfgdir:     # made by `containedclaude test` on the host before the start
         n = ARGS["unknown_folder"]
@@ -614,8 +618,8 @@ def session_checks(td):
                "and again every 100k (%d steps)" % (len(steps) + len(offers) + len(every))
     check("notice close to auto-compaction (context_notice)", context_notice)
     def idle_notice():
-        # the idle-compact mod's line (register.ts) gets the hidden notice from its UserPromptSubmit hook
-        mod = os.path.join(CLONE, "sandbox", "mods", "idle-compact", "hooks")
+        # the compaction mod's line (register.ts) gets the hidden notice from its UserPromptSubmit hook
+        mod = os.path.join(CLONE, "sandbox", "mods", "compaction", "hooks")
         with open(os.path.join(mod, "register.ts")) as fh:
             line = re.search(r"LINE = [^`]*`([^`]*)`", fh.read()).group(1)
         line = line.replace("${min}", "50").replace("${k}", "210")
@@ -628,7 +632,78 @@ def session_checks(td):
         assert "compacted right after your reply" in said(line), "no notice for %r" % line
         assert not said("Remember: " + line), "a notice for another prompt"
         return "the mod's line gets the notice, other prompts don't"
-    check("idle compaction notice (idle-compact mod)", idle_notice)
+    check("idle compaction notice (compaction mod)", idle_notice)
+    def compact_request():
+        # cc-compact prints the line the compaction mod replaces (UNSEEN in register.ts: it says nothing is
+        # scheduled, true of a call the mod can't see) and what to keep on one line (KEEP); its help text must
+        # not hold that line (the mod would take `cc-compact --help` for a request)
+        with open(os.path.join(CLONE, "sandbox", "mods", "compaction", "hooks", "register.ts")) as fh:
+            mod = fh.read()
+        unseen, keep = (re.compile(re.search(r"const %s = /(.*)/m" % name, mod).group(1), re.M)
+                        for name in ("UNSEEN", "KEEP"))
+        tool = os.path.join(CLONE, "sandbox", "bin", "cc-compact")
+        def out(*args):
+            r = subprocess.run([tool] + list(args), universal_newlines=True, stdout=subprocess.PIPE, timeout=30)
+            assert r.returncode == 0, "cc-compact %r: exit %d" % (args, r.returncode)
+            return r.stdout
+        got = out("the  code", "word\nand more")
+        m = unseen.search(got)
+        assert m and m.start() == 0 and "nothing scheduled" in m.group(0) and \
+            got[m.end():] == "\nKeep: the code word and more\n" and \
+            keep.search(got).group(1) == "the code word and more", "output: %r" % got
+        assert unseen.search(out()) and not keep.search(out()), "without text: %r" % out()
+        assert not unseen.search(out("--help")) and not unseen.search(out("-h")), "the help text holds that line"
+        return "says nothing is scheduled (the line the mod replaces), the text to keep on one line; --help doesn't"
+    check("cc-compact's request (compaction mod)", compact_request)
+    def wait_limit():
+        # one cc-wait call waits at most CALL_LIMIT minutes (55), also with a larger --max; a smaller --max and
+        # --max 0 (no limit) are the caller's; tried with a stand-in broker and a limit of 0.4 seconds
+        import importlib.machinery, importlib.util, io, contextlib
+        loader = importlib.machinery.SourceFileLoader("cc_tool", os.path.join(CLONE, "sandbox", "bin", "cc"))
+        cc = importlib.util.module_from_spec(importlib.util.spec_from_loader("cc_tool", loader))
+        loader.exec_module(cc)
+        assert cc.CALL_LIMIT == 55, "CALL_LIMIT is %r" % cc.CALL_LIMIT
+        cc.CALL_LIMIT = 0.4 / 60
+        state = {"until": 0.0}
+        def call(payload, timeout=300):
+            if payload["action"] == "queue" and time.time() < state["until"]:
+                return {"rows": [{"id": "7", "array_id": "7", "name": "n", "state": "RUNNING", "elapsed": "0:01"}]}
+            return {"rows": []}
+        cc.call, cc.logs_for, cc.no_log = call, (lambda jobid: []), (lambda jobid: "stand-in")
+        cc.usage_table = lambda rows: None
+        def run(max_min, lasts):
+            state["until"] = time.time() + lasts
+            buf, t = io.StringIO(), time.time()
+            with contextlib.redirect_stdout(buf):
+                rc = cc.wait(["7"], max_min, 0.2)
+            return rc, buf.getvalue(), time.time() - t
+        for max_min in (None, 90):
+            rc, out, took = run(max_min, 30)
+            assert rc == 2 and "to go on waiting: cc-wait 7" in out and took < 5, \
+                "--max %r: exit %r after %.1f s: %r" % (max_min, rc, took, out[:120])
+        rc, out, took = run(0.005, 30)
+        assert rc == 2 and "still running after 0.005 min:" in out and "to go on" not in out, "--max below: %r" % out
+        rc, out, took = run(0, 1.2)
+        assert rc == 0 and "all done" in out and took >= 1, "--max 0: exit %r after %.1f s: %r" % (rc, took, out[:80])
+        rc, out, took = run(None, 0)
+        assert rc == 0 and "all done" in out, "a finished job: %r" % out[:80]
+        return "one call returns at the limit (also --max above it) and says how to go on; --max 0 has none"
+    check("cc-wait's limit per call", wait_limit)
+    def mod_tests():
+        # the mods' own tests (hooks/register.test.ts), run by this Claude Code against its own engine: what the
+        # mods refuse, note and compact, and that they still fit this version's mod API
+        counts = []
+        for name in ("cc", "compaction"):
+            r = subprocess.run(["claude", "plugin", "test", os.path.join(CLONE, "sandbox", "mods", name)],
+                               universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               timeout=120)
+            m = re.search(r"^\s*(\d+) pass\s*\n\s*(\d+) fail", r.stdout, re.M)
+            failed = re.findall(r"^\(fail\) (.*?)(?: \[[\d.]+ms\])?$", r.stdout, re.M)
+            assert m and r.returncode == 0 and m.group(2) == "0" and int(m.group(1)) > 0, \
+                "%s mod: %s" % (name, "; ".join(failed) or r.stdout.strip()[-300:])
+            counts.append("%s %s" % (name, m.group(1)))
+        return "%s tests pass (claude plugin test)" % ", ".join(counts)
+    check("the mods behave as written (cc, compaction)", mod_tests)
     def host_extras():
         # install.sh --extras on a sample settings.json: added once (an older clone's entry replaced), the user's
         # own entries kept, remove restores the file
@@ -639,8 +714,8 @@ def session_checks(td):
             old = {"matcher": "*", "hooks": [{"type": "command",
                                               "command": "/usr/bin/python3 -I /old/sandbox/hooks/context_notice.py"}]}
             with open(f, "w") as fh:
-                json.dump({"model": "x", "env": {"K": "v", "CLAUDE_CODE_PLUGIN_DIRS": "/own"},
-                           "hooks": {"PostToolUse": [mine, old]}}, fh)
+                json.dump({"model": "x", "env": {"K": "v", "CLAUDE_CODE_PLUGIN_DIRS": os.pathsep.join(
+                    ["/own", "/old/sandbox/mods/idle-compact"])}, "hooks": {"PostToolUse": [mine, old]}}, fh)
             def read_json(p):
                 with open(p) as fh:
                     return json.load(fh)
@@ -652,8 +727,10 @@ def session_checks(td):
             assert run("status") == 2, "an older clone's hook is not reported as outdated"
             assert run("add") == 0 and run("add") == 0 and run("status") == 0, "add failed"
             env_ = read_json(f)["env"]
-            assert env_["K"] == "v" and env_["CLAUDE_CODE_PLUGIN_DIRS"].split(os.pathsep)[0] == "/own" and \
-                "CONTAINEDCLAUDE_COMPACT_NOTICE" in env_, "env after add: %r" % env_
+            dirs = env_["CLAUDE_CODE_PLUGIN_DIRS"].split(os.pathsep)
+            assert env_["K"] == "v" and dirs[0] == "/own" and "CONTAINEDCLAUDE_COMPACT_NOTICE" in env_ and \
+                dirs[1:] in ([], [os.path.join(CLONE, "sandbox", "mods", "compaction")]), "env after add: %r" % env_
+            assert (len(dirs) == 2) == ("CONTAINEDCLAUDE_IDLE_COMPACT_AFTER" in env_), "mod and values: %r" % env_
             post = read_json(f)["hooks"]["PostToolUse"]
             ours = [e for e in post if "context_notice.py" in json.dumps(e)]
             assert post[0] == mine and len(ours) == 1 and CLONE in json.dumps(ours[0]), "after add: %r" % post

@@ -74,8 +74,9 @@ lib/shell-guard.sh             optional (install.sh --shell-guard), sourced by ~
 sandbox/bin/cc (+ cc-run cc-wait cc-jobs cc-cancel cc-log cc-build cc-pull cc-info cc-cluster cc-gpu cc-usage
                                symlinks)
                                client used INSIDE the sandbox; talks JSON to the broker socket
-sandbox/bin/cc-compact          asks for compaction at the end of the turn: prints the request, which the cc
-                               mod acts on (§5.13); without the mod's --from-mod it does nothing and says so
+sandbox/bin/cc-compact          asks for compaction at the end of the turn: prints "nothing scheduled" and what to
+                               keep; the compaction mod, where it sees the call, puts "scheduled" in that
+                               line's place and acts on it (§5.12)
 sandbox/bin/cc-ask (+ cc-ask-batch symlink)
                                `claude -p` calls without tools: a prompt file as system prompt, a text as the
                                message, the reply (or --schema JSON) into a file; cc-ask-batch: one per row of
@@ -93,15 +94,16 @@ sandbox/hooks/context_notice.py  Claude PostToolUse hook for every tool: tells a
 sandbox/hooks/session_title.py  Claude SessionStart hook on resume: gives a session its stored title back (§5.10)
 lib/containedclaude/host_extras.py  add|remove|status: the extras (install.sh --extras) in the user's own
                                settings.json ($CLAUDE_CONFIG_DIR or ~/.claude): context_notice.py, the
-                               idle-compact mod (env CLAUDE_CODE_PLUGIN_DIRS) and site.ini's [claude] values
-                               (env, fixed at install); recognised by path ending, so added once, other entries
-                               kept; status 2 = outdated (other values or clone path)
-sandbox/mods/idle-compact/     Claude Code mod (hooks module and a UserPromptSubmit hook, loaded through
-                               CLAUDE_CODE_PLUGIN_DIRS): notes and compaction before an idle session's prompt
-                               cache expires (§5.12)
+                               compaction mod (env CLAUDE_CODE_PLUGIN_DIRS) and site.ini's [claude] values
+                               (env, fixed at install); recognised by path (the hook script's ending, any
+                               folder in a sandbox/mods), so added once, other entries kept; status 2 =
+                               outdated (other values, clone path or mod folder)
+sandbox/mods/compaction/       Claude Code mod (hooks module, a UserPromptSubmit hook and its own tests, loaded
+                               through CLAUDE_CODE_PLUGIN_DIRS): compaction of the main session before an idle
+                               session's prompt cache expires (notes first) and when the agent asks (§5.12)
 sandbox/mods/cc/               Claude Code mod for contained sessions only: agent types cc:worker and
-                               cc:job-worker (agents/), compaction when the main session asks, waits on
-                               jobs that end before Bash's limit (§5.13)
+                               cc:job-worker (agents/), and the Bash timeouts of waits on jobs (§5.13);
+                               stateless, with its own tests
 templates/                     config.ini, contained_claude.sh (project stub), CLAUDE_environment.md (the
                                sandbox description), CLAUDE_environment_outside.md (the notice on disk)
 site.curry.ini                 committed curry defaults; copied to site.ini by install.sh / init if missing
@@ -209,7 +211,7 @@ memory, history, session records, shell snapshots, Codex rollouts, ...) are boun
    (PreToolUse hook -> write_guard.py, PreToolUse SendMessage + UserPromptSubmit + PostToolUse ListAgents -> peer_guard.py, PostToolUse
    Bash hook -> oom_notice.py, PostToolUse * -> context_notice.py, SessionStart resume -> session_title.py, permissions.deny RemoteTrigger) and `allowedMcpServers: []` plus
    `disableClaudeAiConnectors: true` unless mcp_from_user_config, and an `env` block (project.claude_env: the
-   [claude] values, and in CLAUDE_CODE_PLUGIN_DIRS after the user's own the cc mod and with idle_compact the idle-compact mod) (without the second, every session `claude
+   [claude] values, and in CLAUDE_CODE_PLUGIN_DIRS after the user's own the cc and compaction mods; idle compaction's two values only with idle_compact) (without the second, every session `claude
    remote-control` starts warns about the blocked connectors on stderr, and the server shows that warning in
    place of the session's real error); the user's own entries stay, written only when it changed. bwrap
    binds it read-only over claude-config/settings.json, so every Claude process in the sandbox has these
@@ -622,25 +624,48 @@ compaction); the hook uses that folder only if it is a real folder of its own wi
 sandbox (install.sh --extras, the same script in ~/.claude/settings.json) /tmp is shared.
 Not covered: Codex, a threshold lowered with CLAUDE_AUTOCOMPACT_PCT_OVERRIDE.
 
-### 5.12 Compaction before the prompt cache expires (sandbox/mods/idle-compact)
-A convenience, not containment. The prompt cache lasts an hour (all contained sessions use the 1-hour tier);
-after that the next request of an idle session sends the whole context again at full price. Claude Code's own
-idle compaction ("Compacted while idle", at ~55 min, from 200k tokens) runs only where a person is attached
-(terminal, VS Code, desktop): never in the SDK sessions a Remote Control server starts (entrypoint sdk-cli;
-claude-code#105442), and no setting changes that. So a mod does it in every contained session: on the main
-loop's `turn.complete` with `$.session.usage().context.tokens` >= idle_compact_min_tokens it starts
-`$.clock.after(idle_compact_after min)`; `turn.start` cancels it. When it fires, `$.prompt.submit` sends a
-short line ("Idle 50 min, 160k tokens: notes, then compaction.", `asUser`, so without Claude Code's "The
-idle-compact plugin sent a message" frame), and the mod's UserPromptSubmit hook (hooks/notice.py) recognises that line and adds the notice
-itself as additionalContext, which the model reads and the person doesn't see (write down what matters, reply
-briefly; background tasks notify you). A mod can't hide its own prompt (`isMeta` is the engine's), and its own
-`prompt.submit` hooks never see it ("skipped: re-entry"), so its `context` can't carry the notice; the line and
-the reply stay visible. When that turn ends, a bare `$.command.run({ command: "compact" })` compacts at once on
-the warm cache, its `session.compact` hook handing the summarizer what to keep (a manual compaction in the
-transcript; `/compact <text>` would show the whole text). Values: the [claude] section, passed through the
-settings' env (CONTAINEDCLAUDE_IDLE_COMPACT_*); idle_compact = no leaves the mod out. Loaded as an inline plugin through CLAUDE_CODE_PLUGIN_DIRS in the
-settings' env, so it needs no install and reaches server sessions too; edits to the mod reach a session at its
-next start. In a terminal session it acts before Claude Code's own (50 < 55 min), which then finds a small
+### 5.12 Compaction of the main session: idle and on request (sandbox/mods/compaction)
+A convenience and a cost lever, not containment. One mod runs the two compactions of the main session that
+Claude Code doesn't do itself. It is in every contained session (project.claude_env) and, with idle_compact, in
+the host extras; loaded as an inline plugin through CLAUDE_CODE_PLUGIN_DIRS in the settings' env, so it needs no
+install and reaches server sessions too; edits reach a session at its next start.
+
+One rule for both (hooks/register.ts): a compaction belongs to ONE turn. `turn.start` of the main loop
+(agentId absent) keeps the running turn's id; a compaction is kept as `pending = {turnId, instructions,
+onRequest}` and runs only at the `turn.complete` with that turnId and reason `answer`. Then a bare
+`$.command.run({ command: "compact" })` compacts at once on the warm cache ($.session.compact refuses in SDK
+sessions), its `session.compact` hook handing the summarizer the instructions (a manual compaction in the
+transcript; `/compact <text>` would show the whole text). Everything else compacts nothing: another turn's end
+(also one arriving late, after the next turn began), an interrupted or failed turn, a `pending` whose turn never
+reported its end (dropped when the next begins), the module loaded anew (the engine may replace a mod's copy
+mid-session: its state and timers are gone). What went wrong is said in a notice row of the conversation
+(`say`: `$.session.append` with a system row, which the person sees, the model never reads and the transcript
+file keeps; `$.ui.log` if the row is refused), since without a trace such a case can't be told from one that
+never began. The mod changes no tool call's input: in auto mode the classifier refuses a call a hook changed
+("a hook changed this call's input after auto mode reviewed it") and quotes the changed input, which the agent
+then copies (see the history below). It refuses, or changes what the agent reads after the call.
+History (why turn binding): until 2026-11-15 each of two mods kept one flag that any main-loop turn end used
+up. 2026-11-14, KathaNOMe: the idle notice was declined by the engine (`$.prompt.submit` resolves `{ drop }`,
+it doesn't reject), the flag stayed set, and 46 minutes later the conversation was compacted right after the
+agent's answer to the user's next prompt, without notes. The same day a cc-compact request was lost once after
+an interrupted turn (cause not found; not reproduced).
+
+Idle. The prompt cache lasts an hour (all contained sessions use the 1-hour tier); after that the next request
+of an idle session sends the whole context again at full price. Claude Code's own idle compaction ("Compacted
+while idle", at ~55 min, from 200k tokens) runs only where a person is attached (terminal, VS Code, desktop):
+never in the SDK sessions a Remote Control server starts (entrypoint sdk-cli; claude-code#105442), and no
+setting changes that. So on the main loop's `turn.complete` with `$.session.usage().context.tokens` >=
+idle_compact_min_tokens and no turn running, the mod starts `$.clock.after(idle_compact_after min)`; `turn.start`
+cancels it. When it fires, `$.prompt.submit` sends a short line ("Idle 50 min, 160k tokens: notes, then
+compaction.", `asUser`, so without Claude Code's "The compaction plugin sent a message" frame), and the mod's
+UserPromptSubmit hook (hooks/notice.py) recognises that line and adds the notice itself as additionalContext,
+which the model reads and the person doesn't see (write down what matters, reply briefly; background tasks
+notify you). A mod can't hide its own prompt (`isMeta` is the engine's), and its own `prompt.submit` hooks never
+see it ("skipped: re-entry"), so its `context` can't carry the notice; the line and the reply stay visible. The
+turn that starts with exactly that line (`turn.start`'s text) is the one whose answer is followed by the
+compaction; a notice that was declined starts no such turn. Values: the [claude] section, passed through the
+settings' env (CONTAINEDCLAUDE_IDLE_COMPACT_*); with idle_compact = no they are not passed and the mod starts
+no timer. In a terminal session it acts before Claude Code's own (50 < 55 min), which then finds a small
 context. Not covered: Codex; a session whose process ends while idle (nothing left to compact).
 Why 150k, below compact_offer's 180k: an idle compaction saves the full rewrite of the context (1-hour write,
 2x input) when the person returns after the cache expired, not just cache reads. A replay of the main sessions
@@ -648,74 +673,108 @@ Why 150k, below compact_offer's 180k: an idle compaction saves the full rewrite 
 resumed points paid off 26% below 100k, 67% at 100-150k, 81-100% above. The losses are sessions never resumed
 (about $0.5 each, an upper bound: a closed session doesn't compact).
 
-### 5.13 Worker agent types, compaction on request, waits on jobs (sandbox/mods/cc)
+On request. Past compact_offer tokens (180000) and before the auto-compaction notice is due,
+context_notice.py tells the main session that it may run `cc-compact "<what to keep>"` and end its reply, and
+again each time the context has grown by compact_offer_every (100000; 0 = once): 280k, 380k, ... (its flag
+file holds the step said last; a jump past several steps says it once, a drop below compact_offer starts
+over). Each offer names the next one ("you hear this again at about 380k") and where auto-compaction comes, and
+says the context is not full (without that, an agent took the offer for a warning that it was nearly full,
+2026-11-13). Why repeat: since 2026-11-10 two main sessions ran 31 and 45 requests past 300k without
+compacting (peaks ~355k); a compaction there (~130k input-token equivalents: reading 300k at 0.1, ~8k summary
+output at 5, ~30k rewritten at 2) is repaid by ~27k less per request (270k at 0.1) after about 5 requests,
+15-20 with files read again. 180k: in the replay, compacting at 150-200k paid off 75% of the time (break-even
+18 requests), at 100-150k 56% (34); "half the window" would be 100k or 500k.
+sandbox/bin/cc-compact only prints "cc-compact: nothing scheduled: containedclaude did not see this call. ..."
+and a "Keep: ..." line. The mod's `tool.call` hook on Bash finds cc-compact wherever a command starts in the
+call (COMPACT: also after `;`, `&&`, `|`, a newline, `then`), refuses a subagent, a background call,
+compact_offer = 0 and a context below 90% of compact_offer (the notice's figure is an estimate), and otherwise
+runs the call as written. If the script's line is in the output (UNSEEN; a failed `a && cc-compact` has none),
+the request is kept for the running turn, with the Keep text ahead of the fixed instructions, and the hook
+answers with the tool's result in which that line reads "compaction is scheduled for the end of this turn:
+finish your reply now; you are prompted to continue then" (the result's stdout or stderr is changed, never the
+input). So the agent reads one statement, and a call the hook can't see (inside a script, `bash -c`) says the
+truth by itself. After the compaction the mod `$.prompt.submit`s a one-line prompt to continue (`asUser`,
+visible, like the idle line); if `/compact` ran without compacting (skipped by another hook), the prompt says
+so instead. If the turn was interrupted or failed, the request is dropped and the agent hears it as `context`
+of the next prompt (the mod's `prompt.submit` hook; not on a slash command). In the turn of an idle notice a
+cc-compact only adds its Keep text: the person is away, so no prompt to continue. Outside the sandbox
+(CONTAINEDCLAUDE_COMPACT_OFFER unset: the host extras send no offer and there is no cc-compact) the hook
+leaves every call alone. So what shows in claude.ai is a folded Bash call, `/compact` without arguments and
+the prompt to continue.
+History: until 2026-11-13 the hook matched only a call at the start of the command; an agent ran `cd ...;
+cc-compact "..."` twice, was told "scheduled" and nothing happened. Then the hook added `--from-mod` to the
+command, without which the script said "nothing done": in auto mode that rewrite was refused and the agent
+ran the quoted `cc-compact --from-mod --from-mod ...` (2026-11-14). A first version without rewrite had the
+script say "request made, it counts only if a note follows" and the mod add the note as `context`: Haiku then
+reported a scheduled compaction as unconfirmed (2026-11-15), hence one line that the mod replaces. A mod tool
+instead of the command worked too, but the launcher's allowedMcpServers would have to admit the mod's loopback
+MCP server and each request cost ~70 more tokens. A mod can't compact a subagent ($.session.compact is the
+main conversation's); the worker types of §5.13 compact at ~180k instead.
+
+The mod's tests (hooks/register.test.ts, 30; `claude plugin test sandbox/mods/compaction`, also part of
+`containedclaude test`) play the engine beneath it with a clock in memory: every case above, including the
+2026-11-14 one.
+
+### 5.13 Worker agent types, waits on jobs (sandbox/mods/cc)
 A cost lever, not containment. The cc mod is in every contained session (project.claude_env; not in the host
 extras, its agents name cc-* commands). Measured on two real projects (2026-11-09, ~$390 at API prices):
 subagents are 55-80% of the cost, and a subagent that waits 5-60 min on a job writes its whole context to the
 cache again afterwards (5-minute cache: the subagent default, as subagentPromptCacheTtl is unset).
-- agents/worker.md and agents/job-worker.md (plugin agents cc:worker, cc:job-worker; prompt: Claude's general-purpose
-  agent's, word for word as of 2.1.319, job-worker plus one line on waits): `model: inherit` (the Agent tool's `model` overrides it), `autoCompactWindow: 213000`
-  (compaction ~33k below: ~180k; in a replay of the logs a fixed 180k paid most for subagents, 250k nothing).
-  job-worker has `experimental: {cacheTtl: 1h}`: the 1-hour cache, whose writes cost 2x input instead of 1.25x,
-  so it pays only for tasks that wait; the descriptions say when to pick which. Precedence (2.1.319): env
+- agents/worker.md and agents/job-worker.md (plugin agents cc:worker, cc:job-worker; prompt: Claude's
+  general-purpose agent's, word for word as of 2.1.319, each plus one line on waits and timeouts): `model:
+  inherit` (the Agent tool's `model` overrides it), `autoCompactWindow: 213000` (compaction ~33k below: ~180k;
+  in a replay of the logs a fixed 180k paid most for subagents, 250k nothing). job-worker has `experimental:
+  {cacheTtl: 1h}`: the 1-hour cache, whose writes cost 2x input instead of 1.25x, so it pays only for tasks
+  that wait; the descriptions say when to pick which. Precedence (2.1.319): env
   CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL > setting subagentPromptCacheTtl > the frontmatter (ignored in overage),
-  so setting either would override it. A mod can't compact a subagent ($.session.compact is the main
-  conversation's), so the fixed window is all subagents get.
-- Compaction on request (main session): past compact_offer tokens (180000) and before the auto-compaction
-  notice is due, context_notice.py tells the main session that it may run `cc-compact "<what to keep>"` and
-  end its reply, and again each time the context has grown by compact_offer_every (100000; 0 = once): 280k,
-  380k, ... (its flag file holds the step said last; a jump past several steps says it once, a drop below
-  compact_offer starts over). Each offer names the next one ("you hear this again at about 380k") and where
-  auto-compaction comes, and says the context is not full (without that, an agent took the offer for a
-  warning that it was nearly full, 2026-11-13). Why repeat: since 2026-11-10 two main sessions ran 31 and 45
-  requests past 300k without compacting (peaks ~355k); a compaction there (~130k input-token equivalents:
-  reading 300k at 0.1, ~8k summary output at 5, ~30k rewritten at 2) is repaid by ~27k less per request
-  (270k at 0.1) after about 5 requests, 15-20 with files read again. sandbox/bin/cc-compact only prints the
-  request ("Keep: ..."
-  line); hooks/register.ts's `tool.call` hook on Bash finds cc-compact wherever a command starts in the call
-  (also after `;`, `&&`, `|`, a newline, `then`) and adds --from-mod. Without that flag the script prints
-  "nothing done" and exits 1, so a call the hook can't see (inside a script, `bash -c`) is never told
-  "scheduled" for nothing; the request counts only if the output has the script's SCHEDULED line (a failed
-  `a && cc-compact` has none). (Until 2026-11-13 the hook matched only a call at the start of the command; an
-  agent ran `cd ...; cc-compact "..."` twice, was told "scheduled" and nothing happened. A mod tool instead of
-  the command worked too, but the launcher's allowedMcpServers would have to admit the mod's loopback MCP
-  server and each request cost ~70 more tokens.) The hook refuses a subagent, a background call, compact_offer
-  = 0 and a context below 90% of compact_offer (the notice's figure is an estimate), and on the main loop's
-  `turn.complete` (reason answer; an interrupted turn drops it) runs a bare `/compact`; its `session.compact`
-  hook hands the summarizer what to keep plus fixed instructions. Then it `$.prompt.submit`s a one-line prompt
-  to continue (`asUser`, without the plugin frame; visible, like idle-compact's). So what shows in claude.ai is a folded Bash call, `/compact`
-  without arguments and that prompt (a reply line or `/compact <text>` would show the whole text). The command
-  is run as typed: an `export ...;` prefix would make it a compound command, which asks for approval where
-  plain commands don't. Not for sessions outside the sandbox (no cc mod; the host extras send no offer).
-  180k: in the replay, compacting at 150-200k paid off 75% of the time (break-even 18 requests), at 100-150k
-  56% (34); "half the window" would be 100k or 500k.
-- Waits on jobs: a `tool.call` hook on Bash gives a command that runs cc-wait, `cc-run --wait` or `cc-log -f`
-  (the WAIT pattern; a `--wait` after cc-run's `--` matches too, harmless) a 57-minute timeout and prefixes
-  `export CONTAINEDCLAUDE_WAIT_LIMIT=55;`, unless the agent runs it in the background. project.claude_env sets
-  BASH_MAX_TIMEOUT_MS=3420000 (else Bash clamps any timeout to 10 min): also the most any command may set, so
-  no foreground command outlasts the 1-hour cache. Other commands keep the 2-minute default. With that
-  variable sandbox/bin/cc stops waiting after 55 min (a larger or no `--max`; checks every 30 s at most) and
-  says how to go on, cc-log -f stops following. 55 min: the next request still finds the 1-hour cache (main
-  session, cc:job-worker) and renews it at the cache-read price; 10-minute calls cost 6 reads an hour, one
-  call over 60 min a full 1-hour-cache write. Without the hook, Bash's default 2-minute timeout (agents write
-  `cc-wait --max 25` and no timeout) moved the wait to the background mid-run: 41 of ~430 waits in two
-  projects' transcripts (2026-11), after which the agent slept, polled cc-jobs or waited again. Forcing waits
-  into the background instead (tried) makes a subagent end its turn, which reports to the parent as if done;
-  the parent may then start the same wait. In a stream-json session (as Remote Control runs them) a user
-  message waits until the foreground command ends (tested: seen after a 7-minute cc-wait); the user can
-  interrupt. Not covered: a wait inside a script the agent runs (2-minute default).
+  so setting either would override it. A mod can't compact a subagent, so the fixed window is all subagents
+  get.
+- Waits on jobs, two halves that work without each other. (1) sandbox/bin/cc: one call of cc-wait, `cc-run
+  --wait` or `cc-log -f` waits at most CALL_LIMIT = 55 minutes (a larger or no `--max`; checks every 30 s at
+  most, so it returns by 55.5), then prints "still running" and how to go on, exit 2; `--max 0` waits without
+  limit (for a script that must block; a script that ignores exit 2 would otherwise run on after 55 minutes).
+  55 min: the next request still finds the 1-hour cache (main session, cc:job-worker) and renews it at the
+  cache-read price; 10-minute calls cost 6 reads an hour, one call over 60 min a full 1-hour-cache write. It
+  is the same for a wait in the background (it wakes the agent once an hour, while the cache is warm) and in
+  Codex. (2) hooks/register.ts: a `tool.call` hook on Bash refuses a foreground call that contains such a wait
+  unless it carries `timeout: 3420000`, and the refusal says to run the same command again with it. The WAIT
+  pattern finds the three where a command starts in the call (also after `;`, `&&`, `|`, a newline, `then`,
+  behind `VAR=x`; a `--wait` after cc-run's `--` matches too, harmless), so a call that only names them (grep,
+  echo, a commit message, a cc-compact text) is left alone: of 5840 Bash calls in four projects it finds the
+  599 real waits and none of the mentions; a looser pattern (anywhere after a space) was fine while the hook
+  only added a timeout, but would now refuse those. A script written with a heredoc that has such a line is
+  refused once too (harmless: it runs with the timeout); a wait behind another command (`timeout 500 cc-wait`)
+  is not found. project.claude_env sets
+  BASH_MAX_TIMEOUT_MS=3420000 (else Bash clamps any timeout to 10 min): 57 minutes, also the most any command
+  may set, so no foreground command outlasts the 1-hour cache. Other commands keep the 2-minute default (a
+  longer default for all would let a hung command block for as long). CLAUDE_environment.md and the
+  job-worker's prompt state the rule, so the refusal is rare (live: Haiku set the timeout at its first wait).
+  Without the long timeout, Bash's default (agents write `cc-wait --max 25` and no timeout) moved the wait to
+  the background mid-run: 41 of ~430 waits in two projects' transcripts (2026-11), after which the agent
+  slept, polled cc-jobs or waited again. Forcing waits into the background instead (tried) makes a subagent end
+  its turn, which reports to the parent as if done; the parent may then start the same wait. In a stream-json
+  session (as Remote Control runs them) a user message waits until the foreground command ends (tested: seen
+  after a 7-minute cc-wait); the user can interrupt. Not covered: a wait inside a script the agent runs
+  (2-minute default unless the agent sets a timeout); a hung command chained into the same call as a wait
+  (blocks until the 57 minutes).
+  History: until 2026-11-15 the hook rewrote the call instead (timeout 3420000 and a prefix `export
+  CONTAINEDCLAUDE_WAIT_LIMIT=55;`, which alone set the script's limit). In auto mode the classifier refused
+  each rewritten call and quoted it, the agent ran the quoted text, and the hook prefixed it again: 69 Bash
+  calls in one KathaNOMe session carry the prefix, 33 of them two to four times, some on commands that are no
+  waits; three became approval prompts. A refusal is the agent's own input run as reviewed.
   A subagent other than cc:worker that puts a wait in the background gets a note in the result (`context`):
   ending its turn to wait reports to its caller as if done; wait in the foreground. The main session's
-  background waits stay as they are (no caller; a wait over an hour costs one 1-hour-cache write on resume).
-- cc:worker (5-minute cache; its type from `$.agent.list()` by the call's agentId): any Bash timeout above 4
-  min is lowered to 4 (moved to the background then, not killed); its foreground waits get a 4-minute timeout
-  and CONTAINEDCLAUDE_WAIT_LIMIT=3 (ends by 3.5; Claude Code itself moves a background subagent's foreground
-  command to the background after 3 min unless it has the 1-hour cache) and CONTAINEDCLAUDE_WAIT_HANDBACK (no
-  "to go on waiting" hint), so a short job can still be waited on. When a wait stops there, a command is
-  moved to the background on timeout (Bash result timedOutAfterMs), or it puts a wait in the background, the
-  hook adds a note to the result (`context`): not the worker for long waits, hand back the job IDs and ask
-  for a cc:job-worker, or find a faster way. Refusing such commands (tried) blocked waits on 2-minute jobs.
-  Not covered: waiting with the Monitor tool (no Bash call).
+  background waits stay as they are (no caller).
+- cc:worker (5-minute cache; its type from `$.agent.list()` by the call's agentId): a Bash call with a timeout
+  above 4 minutes is refused ("run the same command again with timeout: 240000"), and so is a foreground wait
+  with any other timeout than that, so a short job can still be waited on (Claude Code itself moves a
+  background subagent's foreground command to the background after 3 min unless it has the 1-hour cache). When
+  a command of its is moved to the background on timeout (Bash result timedOutAfterMs) or it puts a wait in
+  the background, the hook adds a note to the result (`context`): not the worker for long waits, hand back the
+  job IDs and ask for a cc:job-worker, or find a faster way. Refusing waits altogether (tried) blocked waits on
+  2-minute jobs. Not covered: waiting with the Monitor tool (no Bash call).
+The mod keeps no state between calls (only the agent types it has looked up); its tests
+(hooks/register.test.ts, 6; `claude plugin test sandbox/mods/cc`) are part of `containedclaude test`.
 
 ### 5.14 One-shot model calls (sandbox/bin/cc-ask)
 A cost lever, not containment: for many independent texts with the same instructions, a fresh `claude -p` per
@@ -778,9 +837,9 @@ with output, so at 20% the hint could only ever propose the cache.
 | Codex CLI (0.166.0) | its own sandbox = a bwrap + seccomp inner layer; needs /tmp to be a real mount (mount root "/") and, for sockets, `[sandbox_workspace_write] network_access = true` in CODEX_HOME/config.toml (seeded by ensure_state); `[features] daemon_auto_start = false` (seeded: otherwise the TUI copies its binary into packages/ and runs a background server); folder trust `[projects."<path>"] trust_level` (written by codex_trust; Codex can't write config.toml in sessions) | `containedclaude test` runs a command under `codex sandbox` (writes the project, reaches the broker); failure shows there and as "bwrap: Can't mkdir parents ..." or "broker not reachable (Operation not permitted)" in Codex output |
 | Claude Code context and compaction (2.1.319) | context_notice.py: PostToolUse input session_id, transcript_path, agent_id/agent_type (subagents only), tool_response, tool_use_id; user records' message.content (tool_result items with tool_use_id; images as base64 strings, there and in Read's tool_response file.base64), attachment records (types prompt_snapshot, deferred_tools_record, hook_success not sent); transcript records type assistant + message.usage (input + cache_creation_input + cache_read_input tokens) and message.model; subagent transcripts in <session>/subagents/agent-<id>.jsonl; autoCompactWindow in modelSettings / agent frontmatter / CLAUDE_CODE_AUTO_COMPACT_WINDOW; else the model's window from cache/model-catalog/*.json (version 2: catalog.config.models[].id, runtime.max_input_tokens, as Claude Code 2.1.322 reads it); a fixed 33k buffer below the window | the notice comes late, early or never; test's check uses sample transcripts and can't see that, the occasional manual check in §8 does. `/context` (`claude -p /context`, no model call) shows the current buffer |
 | Claude Code session titles (2.1.322) | session_title.py: SessionStart input source, session_id, transcript_path; projects/<key>/<session id>/custom-title.json `{"customTitle": ...}`; output hookSpecificOutput.sessionTitle | A resumed session keeps its derived name in the registry (run/.../claude/sessions/<pid>.json, name and nameSource) and in ListAgents |
-| Claude Code mods (2.1.319) | idle-compact: CLAUDE_CODE_PLUGIN_DIRS read from the settings' env block (inline plugin, hooks module); `turn.start` / `turn.complete` (agentId absent on the main loop, reason), `$.session.usage().context.tokens`, `$.clock.after`, `$.prompt.submit` (works in an idle SDK session; the plugin's UserPromptSubmit command hook sees it, its own `prompt.submit` hooks don't), `$.prompt.submit` `asUser`, a bare `$.command.run({ command: "compact" })` with `session.compact` setting `instructions` (works in SDK sessions, where `$.session.compact()` refuses), `$.env.get`; Claude Code's own idle compaction still skipping SDK sessions | no notice or no compaction in idle sessions; if Claude Code starts idle-compacting SDK sessions itself, the mod still acts first (50 min) and can stay or go. `claude plugin validate sandbox/mods/idle-compact` and the manual check in §8 |
+| Claude Code mods (2.1.325) | compaction mod: CLAUDE_CODE_PLUGIN_DIRS read from the settings' env block (inline plugin, hooks module); `turn.start` (text, turnId; it also hears the turn the mod's own prompt started) / `turn.complete` (turnId, reason; agentId absent on the main loop), `$.session.usage().context.tokens`, `$.clock.after`, `$.prompt.submit` (works in an idle SDK session; resolves `{ drop }` when declined; the plugin's UserPromptSubmit command hook sees it, its own `prompt.submit` hooks don't; `asUser`), a `prompt.submit` hook adding `context`, a bare `$.command.run({ command: "compact" })` with `session.compact` setting `instructions` (works in SDK sessions, where `$.session.compact()` refuses) and answering `{ skip }` or messages, `tool.call` on Bash: `{ deny }`, and a hook's own `{ result }` with the Bash result's `stdout`/`stderr` changed, `$.session.append` of a system row, `$.env.get`; that auto mode accepts all of these (it refuses a changed input); Claude Code's own idle compaction still skipping SDK sessions | no notice or no compaction in idle sessions, cc-compact stays at "nothing scheduled" or the summary misses its Keep text; if Claude Code starts idle-compacting SDK sessions itself, the mod still acts first (50 min) and can stay or go. `containedclaude test` runs the mod's own tests (`claude plugin test`: they fail when the API moved) ; `claude plugin validate sandbox/mods/compaction` and the manual checks in §8 |
 | Claude Code one-shot calls (cc-ask, 2.1.319) | `claude -p` flags --system-prompt-file --tools "" --strict-mcp-config --setting-sources "" --disable-slash-commands --no-session-persistence --output-format json --json-schema --effort; result fields result, structured_output, is_error, usage.cache_read/cache_creation_input_tokens; env FORCE_PROMPT_CACHING_5M, DISABLE_PROMPT_CACHING; total_cost_usd, modelUsage keys (model ids, for READ); cost computed from the tokens (prices() fits on it), cache writes 1.25x | cc-ask fails or loses its cache hits (from cache 0 on the second call); the manual check in §8 |
-| Claude Code agent types, compaction on request, waits on jobs (2.1.319) | cc mod: plugin agents/*.md with name, description, model inherit, autoCompactWindow, experimental.cacheTtl (kept for plugin agents, which drop permissionMode/hooks/mcpServers); usage.cache_creation.ephemeral_1h/5m_input_tokens in subagent transcripts; their prompt is a copy of the general-purpose agent's (function returning "You are an agent for Claude Code..." in the binary); `turn.complete` (reason, agentId), `$.command.run` compact, `session.compact` input `instructions`, `$.session.usage().context.tokens`, `$.prompt.submit`; `tool.call` rewriting Bash's `timeout` and `command` and adding `context`, its `agentId`, `$.agent.list()` type `cc:worker`, Bash result timedOutAfterMs; BASH_MAX_TIMEOUT_MS | the types are missing from the Agent tool, a job-worker writes 5-minute cache (ephemeral_5m), cc-compact doesn't compact or the summary misses its Keep text, or a foreground cc-wait is moved to the background ("did not complete within"); the manual check in §8. After a Claude Code update compare the general-purpose prompt with the agent files' text |
+| Claude Code agent types, waits on jobs (2.1.325) | cc mod: plugin agents/*.md with name, description, model inherit, autoCompactWindow, experimental.cacheTtl (kept for plugin agents, which drop permissionMode/hooks/mcpServers); usage.cache_creation.ephemeral_1h/5m_input_tokens in subagent transcripts; their prompt is a copy of the general-purpose agent's (function returning "You are an agent for Claude Code..." in the binary); `tool.call` on Bash: its `timeout`, `run_in_background`, `agentId`, `{ deny }`, `context` added to a result, `$.agent.list()` type `cc:worker`, Bash result timedOutAfterMs; BASH_MAX_TIMEOUT_MS | the types are missing from the Agent tool, a job-worker writes 5-minute cache (ephemeral_5m), or a foreground cc-wait runs with the default timeout and is moved to the background ("did not complete within"); the mod's own tests in `containedclaude test`, the manual check in §8. After a Claude Code update compare the general-purpose prompt with the agent files' text |
 | util-linux unshare (2.37.4), jobs | --user --map-current-user --mount --propagation private | compat.outer_unshare: falls back to --map-user=UID --map-group=GID (never -r: that maps to root) |
 | apptainer 1.5.5 | exec --userns --containall --workdir --home --pwd --nv --bind --env; build --fakeroot; pull | jobwrap: --userns/--containall/--workdir only if `apptainer exec --help` lists them (compat.likely: if --help is unreadable, pass everything as before); APPTAINER_USERNS=1 forces userns anyway. Security does not depend on these: the surrounding bwrap sandbox decides ro/rw |
 | Claude Code (2.1.319) | CLAUDE_CONFIG_DIR/settings.json read by every Claude process (user settings), also by the sessions `claude remote-control` starts (they inherit env and mounts, not flags; the server refuses to start behind --mcp-config/--strict-mcp-config); `allowedMcpServers: []` there hides every MCP server incl. claude.ai connectors, `disableClaudeAiConnectors: true` keeps the connectors from loading (else each session the server starts warns about them on stderr); the managed-settings folder is fixed at /etc/claude-code (no override in the public build); --settings (admin only), --strict-mcp-config, --mcp-config (not for the server; passed only if `claude --help` lists them, else warns), DISABLE_AUTOUPDATER, hook JSON (tool_name, tool_input.file_path/notebook_path, exit 2 = block + stderr), @import in CLAUDE.md | check `claude --help`; config dir layout names in policy.CLAUDE_CONFIG_RO (missing names are skipped) |
@@ -891,8 +950,8 @@ Connectors off (2026-11-06): a server-style session (`--print --resume=<id>` wit
 which the server showed as the session's failure; with `disableClaudeAiConnectors: true` only the real error.
 Server command (2026-11-06): `test` 32 ok (shell guard 13 cases each, server arguments 13 cases);
 `containedclaude server DIR -- --help` and `cclaude server --help` (outside, and inside a sandbox) print the
-help of `claude remote-control`. A restart within about a minute of stopping is refused ("already served"),
-later it works. Server restarts (2026-11-07, 2.1.319, by hand): server with two sessions, Ctrl+C ("Environment
+help of `claude remote-control`. A restart within about a minute of stopping was refused then ("already served");
+no longer (2026-11-15, the user's report): a stopped server starts again straight away. Server restarts (2026-11-07, 2.1.319, by hand): server with two sessions, Ctrl+C ("Environment
 preserved"), `cclaude server` again: "Found prior environment", the pointer's session "Adopted ... re-queued"
 and running at once, the other one running as soon as it was opened on claude.ai.
 Occasional manual check of messages (by hand, e.g. after a larger Claude Code update; `test` and `update` stay
@@ -986,6 +1045,28 @@ known; `bash -c 'cc-compact x'` got "nothing done" and nothing was compacted. Th
 not full (auto-compaction comes at about 967k)". Not on a fresh session's first tool call: its usage is not in
 the transcript yet when the hook runs (the hook stays silent then; the offer comes at 180k, long after).
 
+Compaction and waits without changing a call (2026-11-15, 2.1.325, Haiku 5.5; `test` 39 ok, `test --jobs` 60
+ok; the mods' own 36 tests are one of those checks). In a throwaway project, stream-json sessions as a Remote Control server starts them
+(`containedclaude shell P -- claude -p --input-format stream-json --output-format stream-json --verbose
+--allowedTools Bash Agent`, stdin kept open; config.ini with compact_offer = 3000, idle_compact_min_tokens =
+1000). Idle (idle_compact_after = 1): the line a minute after the answer, the notice as
+hook_additional_context, notes, a bare /compact, the code word still known. The same with a UserPromptSubmit
+hook in .claude/settings.local.json that blocks the line: a notice row "idle compaction: the notice was not
+delivered: ..." in the transcript, and the answer to the next prompt was not followed by a compaction (the
+2026-11-14 case). cc-compact: `cd P; cc-compact "the code word"` read "compaction is scheduled ..." in the
+output, was compacted, prompted, knew the word; `bash -c "cc-compact x"` read "nothing scheduled:
+containedclaude did not see this call" and nothing happened; a turn interrupted after cc-compact left the row
+"compaction on request: not done, the turn was interrupted" and the next prompt carried the note; cc-compact
+in the turn after an interrupted one compacted. `--permission-mode auto`: a plain `cc-wait 1` was refused with
+the mod's text, ran when repeated with timeout 3420000, and cc-compact compacted: no "a hook changed this
+call's input". Waits on a `sleep 150` job: the main session set timeout 3420000 by itself (from
+CLAUDE_environment.md) and got "all done after 3.0 min" in one call; a cc:worker's `sleep 3` with timeout 600000
+was refused and ran with 240000, its cc-wait with 240000 ended in the foreground; a cc:job-worker that put
+cc-wait in the background got its note and waited in the foreground; a cc:worker's 270-second command (`python3 -c "import time;
+time.sleep(270)"`; Claude Code blocks a bare `sleep 270`) with timeout 240000 was moved to the background
+at 240 s and got the note. Not checked live: a wait reaching the 55 minutes
+(functest's "cc-wait's limit per call" does it with a limit of 0.4 s), a real Remote Control server.
+
 ---------------------------------------------------------------------------------------------------------------
 ## 9. How to change common things
 
@@ -1000,10 +1081,13 @@ the transcript yet when the hook runs (the hook stays silent then; the offer com
 - Messages between sessions: sandbox/hooks/peer_guard.py (formats in §6); its test is functest's "messages
   only within the project", plus the occasional manual check of messages in §8.
 - Compaction notice: sandbox/hooks/context_notice.py (BUFFER, MARGIN; formats in §6).
-- Compaction before the cache expires: sandbox/mods/idle-compact/hooks/register.ts (§5.12); values in
-  config.DEFAULTS["claude"], passed by project.claude_env.
-- Worker agent types, compaction on request: sandbox/mods/cc (§5.13); the offer's text is OFFER in
-  context_notice.py, the request sandbox/bin/cc-compact (its "Keep: " line is KEEP in the mod's register.ts).
+- Compaction of the main session (idle, on request): sandbox/mods/compaction/hooks/register.ts (§5.12); idle
+  values in config.DEFAULTS["claude"], passed by project.claude_env; the offer's text is OFFER in
+  context_notice.py, the request sandbox/bin/cc-compact (its two lines are UNSEEN and KEEP in register.ts;
+  functest's "cc-compact's request" keeps them in step). After a change: `claude plugin test
+  sandbox/mods/compaction` (add the case to hooks/register.test.ts first).
+- Worker agent types, the timeouts of waits: sandbox/mods/cc (§5.13); the 55 minutes are CALL_LIMIT in
+  sandbox/bin/cc, the 57 BASH_MAX_MS in register.ts = BASH_MAX_TIMEOUT_MS in project.claude_env.
 - Launcher settings for Claude (hooks, denials, MCP rule): project.claude_settings / session_settings; they
   reach sessions through the bound settings.json (§3, 4), admin through --settings; functest's "the
   launcher's settings reach every Claude process" checks them.

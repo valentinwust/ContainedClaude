@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """cc-compact [WHAT TO KEEP]
 
-Compacts this conversation when the current turn ends, for the main session of a contained Claude session once
-the compaction offer has come (past compact_offer tokens). WHAT TO KEEP goes to the summary along with fixed
-instructions. After the compaction you are prompted to continue. The cc mod does the work (DEVELOPMENT.md
-§5.13): it refuses the command in a subagent and below the offer's size, and adds --from-mod where it saw the
-call; without that flag the call went unseen (inside a script, `bash -c`, a function), and this says so.
+Asks for this conversation to be compacted when the current turn ends: for the main session of a contained
+Claude session, once the compaction offer has come (past compact_offer tokens). WHAT TO KEEP goes to the summary
+along with fixed instructions. After the compaction you are prompted to continue.
+
+This command only states the wish and prints that nothing is scheduled. The compaction mod (DEVELOPMENT.md
+§5.12) sees the Bash call, refuses it in a subagent and below the offer's size, and otherwise puts "compaction
+is scheduled" in that line's place. So a call it can't see (inside a script, `bash -c`, a function) says the
+truth by itself.
 """
 import sys
 
 if sys.argv[1:2] in (["-h"], ["--help"]):
     print(__doc__.strip())
     sys.exit(0)
-if sys.argv[1:2] != ["--from-mod"]:
-    print("cc-compact: nothing done: run it as a shell command of its own (not inside a script or bash -c).")
-    sys.exit(1)
-keep = " ".join(" ".join(sys.argv[2:]).split())     # one line: the mod reads to its end
-print("Compaction scheduled for the end of this turn: finish your reply now; you are prompted to continue then.")
+keep = " ".join(" ".join(sys.argv[1:]).split())     # one line: the mod reads to its end
+# the mod replaces this line (UNSEEN in sandbox/mods/compaction/hooks/register.ts)
+print("cc-compact: nothing scheduled: containedclaude did not see this call. Run cc-compact as a command of its "
+      "own (not inside a script or bash -c).")
 if keep:
-    print("Keep: " + keep)          # the cc mod reads it from here (KEEP in register.ts)
+    print("Keep: " + keep)          # the mod reads it from here (KEEP in register.ts)

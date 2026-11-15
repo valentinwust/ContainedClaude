@@ -1,0 +1,1 @@
+{ "name": "compaction", "version": "1.0.0", "description": "ContainedClaude: compaction of the main session before an idle session's prompt cache expires (notes first) and when the agent asks for it (cc-compact)" }

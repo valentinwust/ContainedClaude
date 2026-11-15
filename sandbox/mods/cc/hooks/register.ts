@@ -1,48 +1,40 @@
 import type { Register } from 'claude-code'
 
-// ContainedClaude (DEVELOPMENT.md §5.13): compaction when the main session asks for it. Past compact_offer tokens,
-// hooks/context_notice.py tells the main session once that it may run cc-compact (sandbox/bin). Wherever a
-// command starts in the Bash call (also after `;`, `&&`, `|`, a newline, `then`), this adds --from-mod, without
-// which the script says it did nothing (a call this can't see: inside a script, `bash -c`), so the agent is
-// never told "scheduled" for nothing; the call stays one command, which needs no approval where a prefix
-// would. The request counts if the script's SCHEDULED line is in the output (a failed `a && cc-compact` has
-// none). When that turn ends, this runs a bare /compact (as the idle-compact mod does: $.session.compact
-// refuses in SDK sessions) whose summarizer gets what to keep through the session.compact hook, so the visible
-// command stays short; then it prompts the agent to go on. Below 90% of compact_offer (room for the notice's
-// estimate) it refuses: too small to pay off. A mod can't compact a subagent (2.1.319); the worker types in
-// agents/ compact at ~180k instead.
-const COMPACT = /(^|[;&|\n(`{]|\b(?:then|do|else)\s)(\s*)cc-compact(?=[\s;&|)`]|$)/g
-const SCHEDULED = 'Compaction scheduled for the end of this turn'     // cc-compact's lines
-const KEEP = '\nKeep: '
-const INSTRUCTIONS =
-  'Keep file paths, decisions, open work, job IDs and where notes were written, word for word.'
-const DONE = 'Compacted as you asked. Continue where you left off.'
-const SUBAGENT = 'cc-compact: the command was not run: only the main session can be compacted on request.'
-const OFF = 'cc-compact: the command was not run: compaction on request is off in this project (compact_offer = 0).'
-const BACKGROUND = 'cc-compact: the command was not run: run cc-compact in the foreground.'
-const SMALL = (k: number, min: number) =>
-  `cc-compact: the command was not run: the context holds only ${k}k tokens; below about ${min}k compaction ` +
-  'costs more than it saves. Carry on.'
+// ContainedClaude (DEVELOPMENT.md §5.13): waits on jobs, and the Bash timeouts of cc:worker. No state, and
+// nothing here changes a call's input (auto mode refuses a call a hook changed, and the agent then copies the
+// changed text): a call is refused with what to do, or runs as written and gets a note after its output.
 
 // Waits on jobs (cc-wait, cc-run --wait, cc-log -f) that the agent runs in the foreground: Bash's timeout (2
 // minutes unless set) would move them to the background mid-run, and the agent then works around that (sleep,
-// cc-jobs, another wait). So they get 57 minutes (BASH_MAX_TIMEOUT_MS, project.claude_env: also the most any
-// command may set, so none outlasts the 1-hour cache), and CONTAINEDCLAUDE_WAIT_LIMIT makes them return before
-// that ("still running ... cc-wait JOBID" to go on): the next request then still finds the 1-hour cache and
-// renews it. Waits the agent puts in the background stay uncapped.
-const WAIT = /(^|[\s;&|(`])(cc-wait(\s|$)|cc-run(\s[^;&|]*)?\s--wait(\s|$)|cc-log(\s[^;&|]*)?\s-f(\s|$))/
+// cc-jobs, another wait). So they must carry the longest timeout, 57 minutes (BASH_MAX_TIMEOUT_MS,
+// project.claude_env: the most any command may set, so none outlasts the 1-hour cache). The waits themselves
+// return after 55 minutes (CALL_LIMIT in sandbox/bin/cc; "still running ... cc-wait JOBID" to go on): the next
+// request then still finds the 1-hour cache and renews it.
+// WAIT: one of the three where a command starts in the call (also after `;`, `&&`, `|`, a newline, `then`, and
+// behind `VAR=x`), so a call that only names them (grep, echo, a commit message) is left alone. Of 5840 Bash
+// calls in four projects (2026-11) it finds the 599 real ones; a script written with a heredoc that has such a
+// line is refused once too, harmlessly. Not found: a wait behind another command (`timeout 500 cc-wait ...`).
+const WAIT = new RegExp(
+  '(^|[;&|\\n(`{]|\\b(?:then|do|else)\\s)\\s*(?:[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+)*' +
+  '(cc-wait(\\s|$)|cc-run(\\s[^;&|\\n]*)?\\s--wait(\\s|$)|cc-log(\\s[^;&|\\n]*)?\\s-f(\\s|$))')
 const BASH_MAX_MS = 3420000 // = BASH_MAX_TIMEOUT_MS in project.claude_env
-const WAIT_LIMIT_MIN = 55   // checks every 30 s or less: returns by 55.5 min
+const TIMEOUT = (isMain: boolean) =>
+  'Not run: this call waits on jobs in the foreground (cc-wait, cc-run --wait or cc-log -f), which needs the ' +
+  `long Bash timeout (the default would move it to the background after 2 minutes). Run the same command again ` +
+  `with timeout: ${BASH_MAX_MS}; the wait returns by itself after at most 55 minutes ("still running"), then ` +
+  'run it again.' + (isMain ? ' Or run it in the background (run_in_background) and go on working.' : '')
 
 // cc:worker (5-minute cache) is not the agent for long waits: after a pause of 5 minutes its whole context is
-// sent again. Every Bash timeout it sets is lowered to 4 minutes (moved to the background then, not killed);
-// its foreground waits return after 3 (by 3.5), so a short job can still be waited on (Claude Code itself
-// moves a background subagent's command to the background at 3). When a wait stops there, any of its commands
-// is moved to the background on timeout, or it puts a wait in the background, it gets NOTE: hand back or speed
-// up; CONTAINEDCLAUDE_WAIT_HANDBACK drops cc-wait's "to go on waiting" hint.
+// sent again. So its Bash timeouts are at most 4 minutes (moved to the background then, not killed), its
+// foreground waits must carry exactly that, and when a command of its is moved to the background on timeout or
+// it puts a wait in the background, it gets NOTE: hand back or speed up.
 const WORKER = 'cc:worker'
-const WORKER_WAIT_MIN = 3
 const WORKER_MAX_MS = 240000
+const WORKER_TIMEOUT = (isWait: boolean) =>
+  `Not run: you are cc:worker, and your Bash timeouts are at most ${WORKER_MAX_MS} (4 minutes; your prompt ` +
+  'cache lasts 5)' +
+  (isWait ? ', which a wait on jobs in the foreground (cc-wait, cc-run --wait, cc-log -f) needs in full' : '') +
+  `. Run the same command again with timeout: ${WORKER_MAX_MS}.`
 const NOTE =
   'Note: you are cc:worker, and your prompt cache lasts 5 minutes: a pause of 5 minutes or more sends your ' +
   'whole context again, so you are not the worker for long waits. If the task needs them, stop here and report ' +
@@ -52,75 +44,32 @@ const NOTE =
 // if it were done (the caller may then start the same wait), so it is told to wait in the foreground.
 const BG_NOTE =
   'Note: you put a wait in the background. As a subagent, if you end your turn to wait, your caller gets your ' +
-  'report as if you were done. Wait in the foreground instead (cc-wait JOBID): it returns after at most 55 ' +
-  'minutes with "still running", then run it again.'
+  `report as if you were done. Wait in the foreground instead (cc-wait JOBID, with timeout: ${BASH_MAX_MS}): ` +
+  'it returns after at most 55 minutes with "still running", then run it again.'
 
 export const register: Register = on => {
   const types = new Map<string, string>()
-  let asked: string | undefined      // cc-compact ran this turn: what to keep ('' for nothing)
-  let compacting: string | undefined  // the instructions for the /compact this mod runs
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    const command = e.command.replace(COMPACT, '$1$2cc-compact --from-mod')
-    if (command !== e.command) {
-      if (e.agentId !== undefined) return { deny: SUBAGENT }
-      if (e.run_in_background) return { deny: BACKGROUND }
-      const offer = Number(await $.env.get('CONTAINEDCLAUDE_COMPACT_OFFER'))
-      if (!Number.isFinite(offer) || offer <= 0) return { deny: OFF }
-      const tokens = (await $.session.usage()).context.tokens ?? 0
-      if (tokens < offer * 0.9) return { deny: SMALL(Math.round(tokens / 1000), Math.round(offer * 0.9 / 1000)) }
-      const ran = await next({ ...e, command })
-      const text = ran.text ?? ''
-      if (ran.deny === undefined && text.includes(SCHEDULED)) {
-        const at = text.indexOf(KEEP, text.indexOf(SCHEDULED))
-        asked = at < 0 ? '' : text.slice(at + KEEP.length).split('\n')[0].trim()
-      }
-      return ran
-    }
-    let worker = false
+    let isWorker = false
     if (e.agentId !== undefined) {
       if (!types.has(e.agentId))
         for (const a of await $.agent.list()) types.set(a.id, a.type)
-      worker = types.get(e.agentId) === WORKER
+      isWorker = types.get(e.agentId) === WORKER
     }
-    const wait = WAIT.test(e.command)
-    if (!worker) {
-      if (!wait) return next(e)
-      if (!e.run_in_background)
-        return next({ ...e, timeout: BASH_MAX_MS, command: `export CONTAINEDCLAUDE_WAIT_LIMIT=${WAIT_LIMIT_MIN}; ${e.command}` })
-      const ran = await next(e)
-      return e.agentId === undefined || ran.deny !== undefined ? ran : { ...ran, context: [...(ran.context ?? []), BG_NOTE] }
-    }
-    const capped = (e.timeout ?? 0) > WORKER_MAX_MS ? { ...e, timeout: WORKER_MAX_MS } : e
-    const ran = await next(e.run_in_background || !wait ? capped : {
-      ...e, timeout: WORKER_MAX_MS,
-      command: `export CONTAINEDCLAUDE_WAIT_LIMIT=${WORKER_WAIT_MIN} CONTAINEDCLAUDE_WAIT_HANDBACK=1; ${e.command}`,
-    })
-    if (ran.deny !== undefined) return ran   // not isError: cc-wait's "still running" exits 2
-    const r = ran.result as { timedOutAfterMs?: number }
-    const long = r?.timedOutAfterMs !== undefined || (e.run_in_background && wait) ||
-      /still running after|stopped following after/.test(ran.text ?? '')
-    return long ? { ...ran, context: [...(ran.context ?? []), NOTE] } : ran
-  })
-
-  on('turn.complete', async ($, e, next) => {
-    const result = await next(e)
-    if (e.agentId !== undefined) return result
-    const keep = asked
-    asked = undefined                   // an interrupted turn drops the request
-    if (keep === undefined || e.reason !== 'answer') return result
-    compacting = keep ? `${keep} ${INSTRUCTIONS}` : INSTRUCTIONS
-    $.command.run({ command: 'compact' })
-      .then(() => $.prompt.submit({ text: DONE, asUser: true }))
-      .catch(err => $.ui.log(`cc: compaction on request failed: ${String(err)}`, { to: 'debug' }))
-      .finally(() => { compacting = undefined })
-    return result
-  })
-
-  on('session.compact', async ($, e, next) => {
-    if (e.agentId !== undefined || compacting === undefined) return next(e)
-    const instructions = compacting
-    compacting = undefined
-    return next({ ...e, instructions })
-  })
+    const isWait = WAIT.test(e.command)
+    const isBackground = e.run_in_background === true
+    const timeout = e.timeout ?? 0
+    if (isWorker && (timeout > WORKER_MAX_MS || (isWait && !isBackground && timeout < WORKER_MAX_MS)))
+      return { deny: WORKER_TIMEOUT(isWait && timeout <= WORKER_MAX_MS) }
+    if (!isWorker && isWait && !isBackground && timeout < BASH_MAX_MS)
+      return { deny: TIMEOUT(e.agentId === undefined) }
+    const ran = await next(e)
+    if (ran.deny !== undefined || e.agentId === undefined) return ran
+    const result = ran.result as { timedOutAfterMs?: number } | undefined
+    const note = isWorker
+      ? (result?.timedOutAfterMs !== undefined || (isWait && isBackground) ? NOTE : undefined)
+      : (isWait && isBackground ? BG_NOTE : undefined)
+    return note === undefined ? ran : { ...ran, context: [...(ran.context ?? []), note] }
+  }).catch(($, e, next) => next(e))
 }

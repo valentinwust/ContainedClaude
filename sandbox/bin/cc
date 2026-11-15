@@ -27,11 +27,10 @@ import sys
 import time
 
 SOCK = os.environ.get("CONTAINEDCLAUDE_SOCKET", "/tmp/.containedclaude/broker.sock")
-# Set by the cc mod on waits Claude runs in the foreground (DEVELOPMENT.md §5.13): stop before Bash's limit (57
-# minutes in contained sessions, 4 for cc:worker), which would move the wait to the background mid-run.
-# HANDBACK (cc:worker): no hint to wait again, the mod's note says to hand the wait back.
-CALL_LIMIT = float(os.environ.get("CONTAINEDCLAUDE_WAIT_LIMIT") or 0)
-HANDBACK = bool(os.environ.get("CONTAINEDCLAUDE_WAIT_HANDBACK"))
+# The most one call waits, in minutes (DEVELOPMENT.md §5.13): a wait Claude runs in the foreground returns before
+# Bash's longest timeout (57 minutes in contained sessions) would move it to the background mid-run, and the
+# next request still finds the 1-hour prompt cache. `--max 0` waits without limit (for scripts).
+CALL_LIMIT = 55.0
 
 
 def call(payload, timeout=300):
@@ -80,7 +79,8 @@ def job_opts(p):
     p.add_argument("--env", action="append", default=[], metavar="K=V")
     p.add_argument("--cwd")
     p.add_argument("--wait", action="store_true", help="block until the job finished")
-    p.add_argument("--max", type=float, default=0, help="with --wait: give up waiting after MIN minutes")
+    p.add_argument("--max", type=float, help="with --wait: stop waiting after MIN minutes (default and most: "
+                   "%g; 0: no limit)" % CALL_LIMIT)
 
 
 def opts_dict(a):
@@ -151,7 +151,7 @@ def no_log(jobid):
 
 def wait(ids, max_min, interval):
     ids = [str(i).split("_")[0] for i in ids]
-    capped = CALL_LIMIT and not 0 < max_min <= CALL_LIMIT
+    capped = max_min is None or max_min > CALL_LIMIT        # --max 0: no limit
     if capped:
         max_min, interval = CALL_LIMIT, min(interval, 30)
     start = time.time()
@@ -161,7 +161,7 @@ def wait(ids, max_min, interval):
             break
         if max_min and time.time() - start > max_min * 60:
             print("still running after %g min%s:" % (max_min, " (the most one Bash call waits; to go on waiting: "
-                                                     "cc-wait %s)" % " ".join(ids) if capped and not HANDBACK else ""))
+                                                     "cc-wait %s)" % " ".join(ids) if capped else ""))
             for r in active:
                 print("  %-14s %-24s %-10s %s" % (r["id"], r["name"], r["state"], r["elapsed"]))
             return 2
@@ -249,7 +249,8 @@ def main():
 
     if prog == "cc-wait":
         p = argparse.ArgumentParser(prog="cc-wait")
-        p.add_argument("--max", type=float, default=0, help="return (exit 2) after MIN minutes")
+        p.add_argument("--max", type=float, help="return (exit 2) after MIN minutes (default and most: %g; 0: "
+                       "no limit)" % CALL_LIMIT)
         p.add_argument("--interval", type=float, default=30)
         p.add_argument("ids", nargs="+")
         a = p.parse_args(argv)
@@ -296,7 +297,7 @@ def main():
             with open(files[0]) as fh:
                 fh.seek(0, 2)
                 while True:
-                    if CALL_LIMIT and time.time() - start > CALL_LIMIT * 60:
+                    if time.time() - start > CALL_LIMIT * 60:
                         print("(stopped following after %g min, the most one Bash call waits)" % CALL_LIMIT)
                         return 2
                     line = fh.readline()

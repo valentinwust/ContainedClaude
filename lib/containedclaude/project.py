@@ -817,18 +817,18 @@ def claude_settings(cfg):
 
 def claude_env(cfg, user):
     """The [claude] values for every Claude process of the sandbox, through the settings' env block (also the
-    sessions a Remote Control server starts): the compaction notice hook's margin and offer, the cc mod (worker
-    agent types, compaction on request, waits on jobs) with Bash's longest foreground command at 57 minutes (for
-    those waits, and below the 1-hour prompt cache) (DEVELOPMENT.md §5.13), and, with idle_compact, the idle-compact mod and its values (mods through
-    CLAUDE_CODE_PLUGIN_DIRS, after any folders of the user's own)."""
+    sessions a Remote Control server starts): the compaction notice hook's margin and offer; the compaction mod
+    (on request: cc-compact; with idle_compact also before the prompt cache expires, which its two values turn
+    on; DEVELOPMENT.md §5.12); the cc mod (worker agent types, waits on jobs) with Bash's longest foreground
+    command at 57 minutes (for those waits, and below the 1-hour prompt cache) (§5.13). Mods through
+    CLAUDE_CODE_PLUGIN_DIRS, after any folders of the user's own."""
     own = (user.get("env") or {}).get("CLAUDE_CODE_PLUGIN_DIRS") if isinstance(user.get("env"), dict) else None
-    mods = [os.path.join(CLONE, "sandbox", "mods", "cc")]
+    mods = [os.path.join(CLONE, "sandbox", "mods", name) for name in ("cc", "compaction")]
     env = {"CONTAINEDCLAUDE_COMPACT_NOTICE": cfg.get("claude", "compact_notice") or "0",
            "CONTAINEDCLAUDE_COMPACT_OFFER": cfg.get("claude", "compact_offer") or "0",
            "CONTAINEDCLAUDE_COMPACT_OFFER_EVERY": cfg.get("claude", "compact_offer_every") or "0",
            "BASH_MAX_TIMEOUT_MS": "3420000"}
     if cfg.bool("claude", "idle_compact"):
-        mods.append(os.path.join(CLONE, "sandbox", "mods", "idle-compact"))
         env.update(CONTAINEDCLAUDE_IDLE_COMPACT_AFTER=cfg.get("claude", "idle_compact_after"),
                    CONTAINEDCLAUDE_IDLE_COMPACT_MIN_TOKENS=cfg.get("claude", "idle_compact_min_tokens"))
     env["CLAUDE_CODE_PLUGIN_DIRS"] = os.pathsep.join(([own] if own else []) + mods)

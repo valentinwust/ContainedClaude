@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UserPromptSubmit hook of the idle-compact mod: when the prompt is the mod's one-line notice (LINE in
+"""UserPromptSubmit hook of the compaction mod: when the prompt is the mod's one-line notice (LINE in
 register.ts), give the model the notice itself as additionalContext, which the person doesn't see."""
 import json
 import re

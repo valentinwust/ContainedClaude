@@ -2,3 +2,4 @@ site.ini
 __pycache__/
 *.pyc
 .nfs*
+sandbox/mods/*/tsconfig.json

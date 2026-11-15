@@ -59,7 +59,7 @@ if (( extras )); then
 else
   st=0; /usr/bin/python3 -I "$here/lib/containedclaude/host_extras.py" status >/dev/null 2>&1 || st=$?
   if (( st == 2 )); then
-    echo "note: the extras in your Claude settings are outdated (site.ini [claude] or the clone moved): $here/install.sh --extras updates them"
+    echo "note: the extras in your Claude settings are outdated (site.ini [claude], the clone or a mod folder changed): $here/install.sh --extras updates them"
   elif (( st != 0 )); then
     echo "optional: $here/install.sh --extras adds the compaction notices (before auto-compaction, and before an idle session's cache expires) to Claude Code outside the sandbox too"
   fi

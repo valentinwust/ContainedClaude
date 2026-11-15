@@ -103,8 +103,7 @@ Caches (pip, conda, Hugging Face, ...) go to `<project>/.cache/`, new conda envi
 start contained sessions in the project from claude.ai/code or the app.
 - Its sessions share the server's sandbox and limits: at most 6 at once (`--capacity N`).
 - Stopped with Ctrl+C and started again in that folder within 4 hours, it takes back its sessions: the first at
-  once, the others when you open or message them. For about a minute after a stop, claude.ai still refuses a
-  new server there ("already served").
+  once, the others when you open or message them. It can be started again straight away.
 - Worktree mode (`--spawn worktree`, `w`) is not supported: those checkouts hold only what git tracks, so your
   data and results would be missing.
 
@@ -122,12 +121,14 @@ For long jobs, `background_terminal_max_timeout = 7200000` above the first `[sec
 
 ## Other features
 - **Worker agent types**: besides Claude's own, contained sessions can spawn `cc:worker` (5-minute prompt
-  cache, for steady work; it waits at most a few minutes and is told to hand longer waits back) and
-  `cc:job-worker` (1-hour cache, for tasks that wait on jobs, so a wait doesn't send the whole context again). Both compact at about 180k tokens; the spawning agent picks the type and, with
-  the Agent tool's `model`, Sonnet or Opus.
-- **Waits on jobs**: in contained Claude sessions, a `cc-wait` (also `cc-run --wait`, `cc-log -f`) in the
-  foreground returns after at most 55 minutes with "still running", instead of being moved to the
-  background mid-wait after Bash's 2-minute default. You can interrupt it.
+  cache, for steady work; its commands run at most 4 minutes in the foreground and it is told to hand longer
+  waits back) and `cc:job-worker` (1-hour cache, for tasks that wait on jobs, so a wait doesn't send the whole
+  context again). Both compact at about 180k tokens; the spawning agent picks the type and, with the Agent
+  tool's `model`, Sonnet or Opus.
+- **Waits on jobs**: one `cc-wait` (also `cc-run --wait`, `cc-log -f`) returns after at most 55 minutes with
+  "still running" (`--max 0`: no limit, for scripts). In contained Claude sessions, a wait in the foreground
+  must carry the long Bash timeout (the agent is told; a call without it is refused with what to add), so it
+  isn't moved to the background mid-wait after Bash's 2-minute default. You can interrupt it.
 - **The same instructions for many texts** (summarise, classify, extract): `cc-ask-batch prompt.md tasks.csv`
   makes one model call per row (columns `text`, `out`: the reply's file), without tools and on your
   subscription, with the shared prompt read from the prompt cache. `--model` (haiku by default), `--effort` (more thinking), `--schema`
@@ -150,7 +151,8 @@ job.
   covers Remote Control sessions too. Past `compact_offer` tokens (180000; 0 = never) the main session is told
   that it may ask for compaction when much of its context is no longer needed, and again every
   `compact_offer_every` tokens more (100000; 0 = once): `cc-compact "<what to keep>"` compacts it once the
-  turn ends, and it is prompted to continue.
+  turn ends, and it is prompted to continue. When one of the two compactions doesn't happen (your interrupt, a
+  notice that wasn't delivered), a line starting `containedclaude:` in the conversation says why.
 
 Model, effort and auto-compaction window are Claude's and Codex's own settings, in the contained config shared
 by all projects (change them with `containedclaude admin` / `admin codex`, or edit the files):
