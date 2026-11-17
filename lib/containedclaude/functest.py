@@ -789,8 +789,11 @@ def session_checks(td):
         for args, extra in cases:
             want = ["remote-control"] + extra + args
             assert server_args(args) == want, "%s: %s, not %s" % (args, server_args(args), want)
-        return "%d argument cases (--spawn same-dir, --capacity %d unless given or refused)" % (
-            len(cases), SERVER_CAPACITY)
+        # Claude Code's "Resume this session with:" line at exit takes the launcher's name from this variable
+        hint = os.environ.get("CLAUDE_CODE_RESUME_HINT_COMMAND")
+        assert hint == "containedclaude", "CLAUDE_CODE_RESUME_HINT_COMMAND is %r" % hint
+        return "%d argument cases (--spawn same-dir, --capacity %d unless given or refused); resume hint names " \
+            "containedclaude" % (len(cases), SERVER_CAPACITY)
     check("containedclaude server arguments", server_args)
 
     section("Job system (login node)")

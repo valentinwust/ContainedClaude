@@ -1,6 +1,7 @@
 """containedclaude command line."""
 import argparse
 import os
+import shlex
 import sys
 
 USAGE = """containedclaude: Claude Code in a sandbox that can only write to one project folder.
@@ -230,6 +231,12 @@ def main(argv=None):
             target = argv.pop(0)
         return project.run(target, [], command=(argv + claude_args) or ["bash", "--norc", "-i"])
     # run, server (the Remote Control server: `claude remote-control`, which project.run recognises)
+    given = []
     if argv and looks_like_dir(argv[0]):
         target = argv.pop(0)
-    return project.run(target, server_args(argv + claude_args) if cmd == "server" else argv + claude_args)
+        given = [target]
+    if cmd == "server":
+        # Claude Code's own line at the server's end names `claude remote-control`: say what starts it contained
+        again = shlex.join(["containedclaude", "server"] + given + argv + claude_args)
+        return project.run(target, server_args(argv + claude_args), again=again)
+    return project.run(target, argv + claude_args)

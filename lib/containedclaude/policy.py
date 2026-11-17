@@ -633,6 +633,8 @@ def sandbox_env(cfg, mode, extra=None):
                 env.setdefault(k, str(n))
         env["CONTAINEDCLAUDE_CONFIG_RO"] = os.pathsep.join(config_ro(cfg, mode))
         env["DISABLE_AUTOUPDATER"] = "1"
+        if mode == "session":           # Claude Code's "Resume this session with:" line at exit names this launcher
+            env["CLAUDE_CODE_RESUME_HINT_COMMAND"] = "containedclaude"
         env["CONTAINEDCLAUDE_SOCKET"] = os.path.join(SOCK_IN_SANDBOX, "broker.sock")
         if cfg.bool("sandbox", "codex"):
             env["CODEX_HOME"] = CODEX_HOME

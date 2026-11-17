@@ -409,7 +409,8 @@ Env (sandbox_env): drop DROP_ENV_PREFIXES (SSH_*, DBUS_*, KRB5*, CLAUDE_CODE_* i
 socket/token, CODEX_*, SLURM_*, DISPLAY...), PATH = sandbox/bin + the user's ORIGINAL PATH
 (CONTAINEDCLAUDE_INNER_PATH; LD_LIBRARY_PATH/LD_PRELOAD originals via bwrap --setenv, never in the env of bwrap), CONTAINEDCLAUDE_* (used by write_guard and
 cc), XDG_RUNTIME_DIR, TMPDIR, APPTAINER_USERNS=1, APPTAINER_CACHEDIR=<project>/.cache/apptainer; session:
-CLAUDE_CONFIG_DIR, CODEX_HOME, DISABLE_AUTOUPDATER=1, CONTAINEDCLAUDE_SOCKET, CONTAINEDCLAUDE_CONFIG_RO (the
+CLAUDE_CONFIG_DIR, CODEX_HOME, DISABLE_AUTOUPDATER=1, CLAUDE_CODE_RESUME_HINT_COMMAND=containedclaude (sessions only:
+the exit line "Resume this session with:" then names the launcher), CONTAINEDCLAUDE_SOCKET, CONTAINEDCLAUDE_CONFIG_RO (the
 CLAUDE_CONFIG_RO paths for write_guard; empty in admin), XDG_CACHE_HOME=<project>/.cache (+ PIP_CACHE_DIR,
 CONDA_PKGS_DIRS, MPLCONFIGDIR, npm_config_cache, UV_PYTHON_INSTALL_DIR below it, in sessions AND jobs: the real
 home is ro, /tmp is RAM or deleted after the job, and the project is shared, so models/packages downloaded once
@@ -954,6 +955,11 @@ help of `claude remote-control`. A restart within about a minute of stopping was
 no longer (2026-11-15, the user's report): a stopped server starts again straight away. Server restarts (2026-11-07, 2.1.319, by hand): server with two sessions, Ctrl+C ("Environment
 preserved"), `cclaude server` again: "Found prior environment", the pointer's session "Adopted ... re-queued"
 and running at once, the other one running as soon as it was opened on claude.ai.
+Last lines (2026-11-17, 2.1.325, by hand in ~/cctest): Claude Code's own lines at exit name `claude`. A session's
+"Resume this session with:" takes the program from CLAUDE_CODE_RESUME_HINT_COMMAND (one word, `^\w[\w-]*$`), set
+in sandbox_env: it printed `containedclaude --resume ID`, which resumed. The server's "Restart `claude
+remote-control`" is fixed text, so project.run prints the contained command below it (`again`, built in cli.py
+from the arguments as typed): `containedclaude server --name 'hint test'` after Ctrl+C.
 Occasional manual check of messages (by hand, e.g. after a larger Claude Code update; `test` and `update` stay
 short and don't run it): two throwaway projects P and Q; in tmux `containedclaude P -- --name t-A
 --remote-control`, `containedclaude Q -- --name t-C --remote-control`, `containedclaude P -- --name t-B`. Ask

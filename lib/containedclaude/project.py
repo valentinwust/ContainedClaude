@@ -874,8 +874,10 @@ def write_session_settings(cfg):
     return None
 
 
-def run(project, claude_args, mode="session", out=sys.stderr, command=None):
-    """Start Claude (or `command`, e.g. bash for `containedclaude shell`) in the sandbox of a project."""
+def run(project, claude_args, mode="session", out=sys.stderr, command=None, again=None):
+    """Start Claude (or `command`, e.g. bash for `containedclaude shell`) in the sandbox of a project. `again`: the
+    command that starts this again, printed when it ends (the Remote Control server, whose own last line names
+    `claude remote-control`)."""
     problem = access_problem(project)
     if problem:
         out.write("containedclaude: cannot start: %s\n" % problem)
@@ -1000,6 +1002,9 @@ def run(project, claude_args, mode="session", out=sys.stderr, command=None):
         shutil.rmtree(sock_dir, ignore_errors=True)
         if sec is not None:
             os.close(sec)
+    if again:
+        out.write("containedclaude: to start this server again, contained, run: %s\n" % again)
+        out.flush()
     report_changes(cfg, before, sensitive_snapshot(cfg), out)
     return rc
 
