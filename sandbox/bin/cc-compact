@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """cc-compact [WHAT TO KEEP]
 
-Asks for this conversation to be compacted when the current turn ends: for the main session of a contained
-Claude session, once the compaction offer has come (past compact_offer tokens). WHAT TO KEEP goes to the summary
-along with fixed instructions. After the compaction you are prompted to continue.
-
-This command only states the wish and prints that nothing is scheduled. The compaction mod (DEVELOPMENT.md
-§5.12) sees the Bash call, refuses it in a subagent and below the offer's size, and otherwise puts "compaction
-is scheduled" in that line's place. So a call it can't see (inside a script, `bash -c`, a function) says the
-truth by itself.
+Has this conversation compacted when your current turn ends, once a context notice has offered it (main session
+only). Write down what matters first; WHAT TO KEEP goes to the summary. End your reply after the call; you are
+prompted to continue after the compaction. Run it as a command of its own, not inside a script or `bash -c`.
 """
+# This script only states the wish and prints that nothing is scheduled. The compaction mod
+# (sandbox/mods/compaction/hooks/register.ts) sees the Bash call, refuses it in a subagent and below the offer's
+# size, and otherwise puts "compaction is scheduled" in that line's place. So a call it can't see (inside a
+# script, `bash -c`, a function) says the truth by itself.
 import sys
 
 if sys.argv[1:2] in (["-h"], ["--help"]):

@@ -369,7 +369,7 @@ def read_only(agent_type, definition):
     tools = names(definition.get("tools") or "")
     able = WRITERS if not tools or "*" in tools else tools & WRITERS     # no tools field: all tools
     return not able - names(definition.get("disallowedTools") or "")
-# cc-compact: sandbox/bin, done by the cc mod (sandbox/mods/cc/hooks/register.ts)
+# cc-compact: sandbox/bin, done by the compaction mod (sandbox/mods/compaction/hooks/register.ts)
 # "not full": without the distance an agent took the offer for a warning that the context was nearly full
 OFFER = ("containedclaude: your context holds about %dk tokens. It is not full (auto-compaction comes at about "
          "%dk), but every request sends all of it. If much of it is no longer needed (images and logs "
