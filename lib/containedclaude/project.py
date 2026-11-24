@@ -957,6 +957,8 @@ def run(project, claude_args, mode="session", out=sys.stderr, command=None, agai
     scope, scope_env = policy.session_scope(cfg)       # memory limit for the whole session (cgroup)
     cmd = policy.session_command(cfg, "session" if mode == "session" else "admin", sock_dir, runtime, store,
                                  seccomp=sec, scope=scope)
+    # the server for sessions started from claude.ai (`remote-control` as the first argument)
+    server = not command and mode == "session" and list(claude_args[:1]) == ["remote-control"]
     if command:
         cmd += ["--"] + list(command)
     else:
@@ -967,9 +969,8 @@ def run(project, claude_args, mode="session", out=sys.stderr, command=None, agai
             cmd += ["--settings", settings_path]
         elif mode != "session":
             compat.warn_once("claude lacks --settings: the write hook is not installed (the sandbox still applies)")
-        # the server for sessions started from claude.ai: Claude Code refuses to start it behind the MCP flags,
-        # and the sessions it starts get no flags anyway (they have the settings' allowedMcpServers)
-        server = mode == "session" and list(claude_args[:1]) == ["remote-control"]
+        # The server: Claude Code refuses to start it behind the MCP flags, and the sessions it starts get no
+        # flags anyway (they have the settings' allowedMcpServers)
         if not server and not cfg.bool("sandbox", "mcp_from_user_config"):
             if compat.likely("claude", "--strict-mcp-config") and compat.likely("claude", "--mcp-config"):
                 # --mcp-config takes several files: the boolean flag after it ends the list, so that a
@@ -981,6 +982,8 @@ def run(project, claude_args, mode="session", out=sys.stderr, command=None, agai
         cmd += list(claude_args)
     env = policy.sandbox_env(cfg, "session" if mode == "session" else "admin")
     env.update(scope_env)
+    if server:      # its sessions inherit this: SendUserFile then uploads to the chat (else: "nowhere to place a file")
+        env["CLAUDE_CODE_BRIEF_UPLOAD"] = "1"
     proc = None
 
     def forward(signum, frame):     # hang-up (ssh dropped) / kill: end the sandbox, then clean up and report

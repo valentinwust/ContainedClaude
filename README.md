@@ -104,6 +104,7 @@ start contained sessions in the project from claude.ai/code or the app.
 - Its sessions share the server's sandbox and limits: at most 6 at once (`--capacity N`).
 - Stopped with Ctrl+C and started again in that folder within 4 hours, it takes back its sessions: the first at
   once, the others when you open or message them. It can be started again straight away.
+- Its sessions can send you files (SendUserFile), which claude.ai shows in the chat.
 - Claude Code's last line names `claude remote-control`; the line below it gives the contained command. In the
   same way, a session's "Resume this session with:" line shows `containedclaude --resume ID`.
 - Worktree mode (`--spawn worktree`, `w`) is not supported: those checkouts hold only what git tracks, so your
