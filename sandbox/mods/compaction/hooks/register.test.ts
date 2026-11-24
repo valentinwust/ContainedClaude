@@ -416,7 +416,7 @@ test('request: when /compact compacts nothing, is skipped or fails, the agent is
   await bash($, 'cc-compact x')
   await end($, 't1')
   await clock.settle()
-  expect(seen.prompts.map(p => p.text)).toEqual(['The compaction you asked for did not run. Continue where you left off.'])
+  expect(seen.prompts.map(p => p.text)).toEqual(['The compaction you asked for did not run (/compact compacted nothing). Continue where you left off.'])
   state.compaction = 'skipped'
   await start($, 't2')
   await bash($, 'cc-compact x')
@@ -429,11 +429,70 @@ test('request: when /compact compacts nothing, is skipped or fails, the agent is
   await end($, 't3')
   await clock.settle()
   expect(seen.prompts).toHaveLength(2)
-  expect(said()).toContain('/compact failed')
+  expect(said()).toContain('/compact did not run')
   // and the instructions of a compaction that never came are not given to a later one
   state.compaction = 'runs'
   await $.session.compact({ trigger: 'manual', messages: MESSAGES, instructions: 'mine' })
   expect(seen.compactions.at(-1)).toBe('mine')
+})
+
+// After an interrupt the engine refuses $.command.run ("the session was stopped and nobody has sent input since")
+// until the person's next prompt (2026-11-22/24, kathanome_claude: three requests lost, the agent never told).
+test('request: /compact refused: tried again at the end of the turn the person\'s next prompt starts', async ($, on) => {
+  const { seen, state, clock, said } = world($, on, { compaction: 'rejects' })
+  await start($, 't1')
+  await bash($, 'cc-compact x')
+  await end($, 't1')
+  await clock.settle()
+  expect(seen.compactions).toHaveLength(0)
+  expect(said()).toContain('/compact did not run')
+  const notice = await $.prompt.submit({ text: 'job done', wait: false, origin: { kind: 'task-notification' } })
+  expect(notice.context).toBeUndefined()                 // not the person's: lifts no stop, arms nothing
+  await turn($, 't2', 'job done')
+  await clock.settle()
+  expect(seen.commands).toHaveLength(1)
+  state.compaction = 'runs'
+  const next = await $.prompt.submit({ text: 'go on', wait: false, origin: { kind: 'bridge' } })
+  expect(next.context?.[0]).toMatch(new RegExp('^containedclaude: the compaction you asked for with cc-compact ' +
+    'could not run \\(/compact did not run: .+\\)\\. It runs when this turn ends instead\\.$'))
+  await turn($, 't3', 'go on')
+  await clock.settle()
+  expect(seen.compactions).toEqual([`the code word ${INSTRUCTIONS}`])
+  expect(seen.prompts.at(-1)?.text).toBe(DONE)
+  await turn($, 't4')                                    // once only
+  await clock.settle()
+  expect(seen.commands).toHaveLength(2)
+})
+
+test('request: refused on the second try too: a visible prompt says so, or a note if that is dropped', async ($, on) => {
+  const { seen, state, clock } = world($, on, { compaction: 'rejects' })
+  const twice = async (id: string) => {
+    await start($, `${id}a`)
+    await bash($, 'cc-compact x')
+    await end($, `${id}a`)
+    await clock.settle()
+    await $.prompt.submit({ text: 'go on', wait: false, origin: { kind: 'composer' } })
+    await turn($, `${id}b`, 'go on')
+    await clock.settle()
+  }
+  await twice('1')
+  expect(seen.prompts.at(-1)?.text).toMatch(/^The compaction you asked for did not run \(\/compact did not run: .+\)\. Continue where you left off\.$/)
+  state.drop = 'the session was stopped'
+  await twice('2')
+  state.drop = undefined
+  const next = await $.prompt.submit({ text: 'and now', wait: false, origin: { kind: 'composer' } })
+  expect(next.context?.[0]).toMatch(/was not done \(\/compact did not run: .+\)\. Run cc-compact again/)
+})
+
+test('request: a "did not run" prompt the engine dropped reaches the agent as a note with the next prompt', async ($, on) => {
+  const { state, clock } = world($, on, { drop: 'the session was stopped', compaction: 'none' })
+  await start($, 't1')
+  await bash($, 'cc-compact x')
+  await end($, 't1')
+  await clock.settle()
+  state.drop = undefined
+  const next = await $.prompt.submit({ text: 'go on', wait: false, origin: { kind: 'composer' } })
+  expect(next.context?.[0]).toContain('was not done (/compact compacted nothing)')
 })
 
 test('request: in the turn of an idle notice, what to keep is taken and no prompt to continue is sent', async ($, on) => {

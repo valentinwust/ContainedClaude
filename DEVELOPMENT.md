@@ -640,8 +640,8 @@ transcript; `/compact <text>` would show the whole text). Everything else compac
 (also one arriving late, after the next turn began), an interrupted or failed turn, a `pending` whose turn never
 reported its end (dropped when the next begins), the module loaded anew (the engine may replace a mod's copy
 mid-session: its state and timers are gone). What went wrong is said in a notice row of the conversation
-(`say`: `$.session.append` with a system row, which the person sees, the model never reads and the transcript
-file keeps; `$.ui.log` if the row is refused), since without a trace such a case can't be told from one that
+(`say`: `$.session.append` with a system row, which the terminal shows and claude.ai doesn't, the model never
+reads and the transcript file keeps; `$.ui.log` if the row is refused), since without a trace such a case can't be told from one that
 never began. The mod changes no tool call's input: in auto mode the classifier refuses a call a hook changed
 ("a hook changed this call's input after auto mode reviewed it") and quotes the changed input, which the agent
 then copies (see the history below). It refuses, or changes what the agent reads after the call.
@@ -649,7 +649,7 @@ History (why turn binding): until 2026-11-15 each of two mods kept one flag that
 up. 2026-11-14, KathaNOMe: the idle notice was declined by the engine (`$.prompt.submit` resolves `{ drop }`,
 it doesn't reject), the flag stayed set, and 46 minutes later the conversation was compacted right after the
 agent's answer to the user's next prompt, without notes. The same day a cc-compact request was lost once after
-an interrupted turn (cause not found; not reproduced).
+an interrupted turn; cause found 2026-11-24 (see On request).
 
 Idle. The prompt cache lasts an hour (all contained sessions use the 1-hour tier); after that the next request
 of an idle session sends the whole context again at full price. Claude Code's own idle compaction ("Compacted
@@ -697,7 +697,18 @@ input). So the agent reads one statement, and a call the hook can't see (inside 
 truth by itself. After the compaction the mod `$.prompt.submit`s a one-line prompt to continue (`asUser`,
 visible, like the idle line); if `/compact` ran without compacting (skipped by another hook), the prompt says
 so instead. If the turn was interrupted or failed, the request is dropped and the agent hears it as `context`
-of the next prompt (the mod's `prompt.submit` hook; not on a slash command). In the turn of an idle notice a
+of the next prompt (the mod's `prompt.submit` hook; not on a slash command). After an interrupt the engine runs
+no command a mod asks for, and accepts no prompt from it, until the person sends another message ("the session
+was stopped and nobody has sent input since"; a message typed before the interrupt and queued doesn't count: a
+prompt counts when Enter is pressed), and the interrupt empties the queue a waiting `/compact` is in. So when
+`$.command.run` rejects, the request waits for the person's next prompt (any origin but those of machines: task
+notification, peer, plugin, schedule, observer; one that isn't the person's costs only a second refusal), which
+gets a note "could not run (reason). It runs when this
+turn ends instead", and is tried once more at the end of that turn. Refused again, the prompt to continue says
+it did not run, and why; if that prompt is dropped too, the agent hears it as a note with the next prompt (the
+notice rows don't show in claude.ai). History: until 2026-11-24 a refused `/compact` was only a notice row; in kathanome_claude (Remote
+Control, claude.ai) three requests were lost after interrupts, the person saw nothing and the agent announced
+compactions that never happened. In the turn of an idle notice a
 cc-compact only adds its Keep text: the person is away, so no prompt to continue. Outside the sandbox
 (CONTAINEDCLAUDE_COMPACT_OFFER unset: the host extras send no offer and there is no cc-compact) the hook
 leaves every call alone. So what shows in claude.ai is a folded Bash call, `/compact` without arguments and
@@ -712,7 +723,7 @@ instead of the command worked too, but the launcher's allowedMcpServers would ha
 MCP server and each request cost ~70 more tokens. A mod can't compact a subagent ($.session.compact is the
 main conversation's); the worker types of §5.13 compact at ~180k instead.
 
-The mod's tests (hooks/register.test.ts, 30; `claude plugin test sandbox/mods/compaction`, also part of
+The mod's tests (hooks/register.test.ts, 33; `claude plugin test sandbox/mods/compaction`, also part of
 `containedclaude test`) play the engine beneath it with a clock in memory: every case above, including the
 2026-11-14 one.
 
